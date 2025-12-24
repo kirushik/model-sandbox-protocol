@@ -36,6 +36,18 @@ Copy-on-write filesystem layer for ephemeral workspaces.
 
 Architectural decisions should be documented here with rationale. For library-specific choices, see [LIBRARY_CHOICES.md](./LIBRARY_CHOICES.md).
 
+### Timeout Enforcement Policy (Hard Kill)
+
+Sandbox execution timeouts are enforced with a **hard kill** policy:
+
+- When the configured timeout elapses, the sandbox runner terminates the child process with **SIGKILL** (no graceful shutdown).
+- Rationale:
+  - Deterministic behavior for tests and automation (no long “grace periods”).
+  - Avoids relying on library-specific timeout semantics (e.g., second-granularity `wait_timeout(seconds)` APIs).
+  - Avoids hangs caused by commands that ignore SIGTERM or spawn child processes that linger.
+
+If you observe slow or stuck test runs (e.g., “has been running for over 60 seconds”), first check timeout enforcement logic and ensure it is not being inadvertently converted to second-granularity timeouts.
+
 ### Kernel Requirements
 
 We require a minimum kernel version of **6.7**. This is a hard requirement — the sandbox will refuse to start on older kernels.
@@ -53,8 +65,6 @@ We require a minimum kernel version of **6.7**. This is a hard requirement — t
 It's a goal to support a wider range of kernels in the future, but for now we prioritize security and simplicity.
 
 See [SYSTEM_REQUIREMENTS.md](./SYSTEM_REQUIREMENTS.md) for distribution compatibility and verification steps.
-
-
 
 ## References
 

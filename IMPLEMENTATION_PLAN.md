@@ -96,14 +96,14 @@ tokio-test = "0.4"
 
 ### Checklist
 
-- [ ] **1.1** Create `src/sandbox/mod.rs` with public API
-- [ ] **1.2** Create `src/sandbox/config.rs` with SandboxConfig struct
-- [ ] **1.3** Create `src/sandbox/container.rs` with SandboxContainer
-- [ ] **1.4** Implement namespace creation (user, mount, PID, network, IPC, UTS)
-- [ ] **1.5** Implement `execute()` method to run commands
-- [ ] **1.6** Capture stdout/stderr from sandboxed commands
-- [ ] **1.7** Document network egress pathway (future CLI flag)
-- [ ] **1.8** Write integration tests for basic sandbox
+- [x] **1.1** Create `src/sandbox/mod.rs` with public API
+- [x] **1.2** Create `src/sandbox/config.rs` with SandboxConfig struct
+- [x] **1.3** Create `src/sandbox/container.rs` with SandboxContainer
+- [x] **1.4** Implement namespace creation (user, mount, PID, network, IPC, UTS)
+- [x] **1.5** Implement `execute()` method to run commands
+- [x] **1.6** Capture stdout/stderr from sandboxed commands
+- [x] **1.7** Document network egress pathway (future CLI flag)
+- [x] **1.8** Write integration tests for basic sandbox
 
 ### Files to Create
 
@@ -147,11 +147,11 @@ pub struct CommandOutput {
 
 ### Acceptance Criteria
 
-- [ ] Can run `echo hello` in sandbox, receive "hello" output
-- [ ] Can run `cat /proc/self/status` and verify PID namespace (PID 1)
-- [ ] Network is isolated (external connections fail)
-- [ ] IPC is isolated (cannot connect to host abstract sockets)
-- [ ] Integration tests pass
+- [x] Can run `echo hello` in sandbox, receive "hello" output
+- [x] Can run `cat /proc/self/status` and verify PID namespace (PID 1)
+- [x] Network is isolated (external connections fail)
+- [x] IPC is isolated (cannot connect to host abstract sockets)
+- [x] Integration tests pass
 
 ---
 

@@ -24,6 +24,11 @@ pub enum Error {
     #[diagnostic(code(msp::server))]
     Server(#[from] ServerError),
 
+    /// Sandbox error
+    #[error("Sandbox error")]
+    #[diagnostic(code(msp::sandbox))]
+    Sandbox(#[from] SandboxError),
+
     /// I/O error
     #[error("I/O error: {0}")]
     #[diagnostic(code(msp::io))]
@@ -103,6 +108,35 @@ pub enum ServerError {
     #[error("Transport error: {0}")]
     #[diagnostic(code(msp::server::transport))]
     Transport(String),
+}
+
+/// Errors related to sandbox operations.
+#[derive(Error, Debug, Diagnostic)]
+pub enum SandboxError {
+    /// Failed to create sandbox container
+    #[error("Failed to create sandbox container: {0}")]
+    #[diagnostic(code(msp::sandbox::creation))]
+    CreationFailed(String),
+
+    /// Failed to execute command in sandbox
+    #[error("Failed to execute command in sandbox: {0}")]
+    #[diagnostic(code(msp::sandbox::execution))]
+    ExecutionFailed(String),
+
+    /// Command timed out
+    #[error("Command timed out after {timeout_seconds} seconds")]
+    #[diagnostic(code(msp::sandbox::timeout))]
+    Timeout { timeout_seconds: u64 },
+
+    /// Invalid command
+    #[error("Invalid command: {0}")]
+    #[diagnostic(code(msp::sandbox::invalid_command))]
+    InvalidCommand(String),
+
+    /// Failed to decode command output as UTF-8
+    #[error("Failed to decode command output as UTF-8: {context}")]
+    #[diagnostic(code(msp::sandbox::encoding))]
+    OutputEncodingError { context: String },
 }
 
 /// Result type alias for this crate.

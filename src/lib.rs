@@ -28,8 +28,10 @@
 //! ```
 
 pub mod error;
+pub mod sandbox;
 pub mod server;
 pub mod system;
 
 // Re-export commonly used types
 pub use error::{Error, Result};
+pub use sandbox::{CommandOutput, SandboxConfig, SandboxContainer};
