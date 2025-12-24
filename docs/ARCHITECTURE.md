@@ -36,26 +36,24 @@ Copy-on-write filesystem layer for ephemeral workspaces.
 
 Architectural decisions should be documented here with rationale. For library-specific choices, see [LIBRARY_CHOICES.md](./LIBRARY_CHOICES.md).
 
-### Kernel Feature Fallbacks
+### Kernel Requirements
 
-We require a minimum kernel version of **5.13** (for Landlock). Features unavailable on older kernels degrade gracefully:
+We require a minimum kernel version of **6.7**. This is a hard requirement — the sandbox will refuse to start on older kernels.
 
-| Feature | Minimum Kernel | Fallback Behavior |
-|---------|---------------|-------------------|
-| Landlock filesystem | 5.13 | **Hard requirement** — no fallback |
-| OverlayFS in userns | 5.11 | Satisfied by 5.13 requirement |
-| Landlock TCP (ABI v4) | 6.4 | Network namespace isolation only |
-| Landlock IPC scoping (ABI v6) | 6.7 | IPC namespace isolation only |
+| Feature | Kernel | Status |
+|---------|--------|--------|
+| Landlock filesystem (ABI v1) | 5.13 | Included |
+| OverlayFS in userns | 5.11 | Included |
+| Landlock TCP (ABI v4) | 6.4 | Included |
+| Landlock IPC scoping (ABI v6) | 6.7 | **Required** |
+| cgroups v2 | — | **Required** |
 
-**Recommended kernel: 6.7+** for full set of Landlock restrictions.
+**Why 6.7?** Landlock IPC scoping is essential for proper sandbox isolation. Without it, sandboxed processes could communicate via abstract Unix sockets or send signals to other processes.
 
-> **TODO**: Implement runtime ABI detection and graceful degradation.
-> 
-> The sandbox manager should:
-> 1. Detect Landlock ABI version at startup via `landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)`
-> 2. Log available security features
-> 3. Apply the maximum available protections for the detected ABI
-> 4. Warn (but continue) if running below recommended kernel version
+It's a goal to support a wider range of kernels in the future, but for now we prioritize security and simplicity.
+
+See [SYSTEM_REQUIREMENTS.md](./SYSTEM_REQUIREMENTS.md) for distribution compatibility and verification steps.
+
 
 
 ## References

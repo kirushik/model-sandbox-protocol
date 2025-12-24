@@ -1,6 +1,6 @@
 # Model Sandbox Protocol
 
-Namespace-based sandboxing MCP server for safe AI agent code execution. Rust, x86_64 Linux only. See `docs/SYSTEM_REQUIREMENTS.md` for kernel and host OS requirements.
+Namespace-based sandboxing MCP server for safe AI agent code execution. Rust, x86_64 Linux only, kernel 6.7+ required. See `docs/SYSTEM_REQUIREMENTS.md` for full requirements.
 
 ## Documentation
 

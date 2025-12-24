@@ -1,6 +1,6 @@
 # Building a sandboxed code execution MCP server in Rust
 
-A production-grade MCP server for AI agent code execution is best built using Rust's **rmcp** SDK (official, actively maintained), combined with native Linux namespaces for isolation, native OverlayFS for unprivileged CoW filesystems (kernel 5.13+), and layered security via seccomp-bpf, Landlock, and capability dropping. This architecture provides strong isolation without requiring root privileges, making it suitable for deployment alongside AI agents.
+A production-grade MCP server for AI agent code execution is best built using Rust's **rmcp** SDK (official, actively maintained), combined with native Linux namespaces for isolation, native OverlayFS for unprivileged CoW filesystems, and layered security via seccomp-bpf, Landlock, and capability dropping. This architecture provides strong isolation without requiring root privileges, making it suitable for deployment alongside AI agents. Requires kernel 6.7+ (for Landlock IPC scoping).
 
 ## MCP protocol fundamentals and Rust SDK options
 
@@ -66,7 +66,7 @@ For a custom sandboxing server, **nsjail** offers the best balance of features a
 
 OverlayFS combines a read-only lower layer with a writable upper layer, presenting a unified view at the merged mountpoint. The **work directory** is mandatory for writable overlays—it stages atomic operations during copy-up.
 
-**Privilege requirements**: Native OverlayFS requires `CAP_SYS_ADMIN`, but kernel 5.11+ allows mounting within user namespaces using the `userxattr` option. Since we require kernel 5.13+ (for Landlock), native OverlayFS is always available.
+**Privilege requirements**: Native OverlayFS requires `CAP_SYS_ADMIN`, but kernel 5.11+ allows mounting within user namespaces using the `userxattr` option. Since we require kernel 6.7+ (for Landlock IPC scoping), native OverlayFS is always available.
 
 Recommended directory structure for ephemeral sandboxes:
 
@@ -298,7 +298,7 @@ For a production MCP sandbox server:
 
 1. **Use rmcp** for MCP protocol with stdio transport
 2. **Use hakoniwa** for integrated sandboxing (namespaces + Landlock + seccomp + resource limits)
-3. **Native OverlayFS** with `userxattr` for CoW filesystems (requires kernel 5.13+, which is our minimum)
+3. **Native OverlayFS** with `userxattr` for CoW filesystems (requires kernel 5.13+, satisfied by our 6.7+ minimum)
 4. **Layer security in correct order**: namespaces → network → mounts → close FDs → Landlock → NO_NEW_PRIVS → drop caps → seccomp (last)
 5. **Session persistence**: Directory structure at `~/.mcp-sandboxes/{session-id}/workspace` accessible to both host and sandbox
 6. **Network**: Default isolated; if egress needed, veth pair with SNI-filtering transparent proxy

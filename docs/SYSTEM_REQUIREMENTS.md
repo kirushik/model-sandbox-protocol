@@ -10,28 +10,21 @@ This document specifies the host system requirements for running the model-sandb
 | **6.4** | Recommended | Landlock ABI v4 (TCP network restrictions) |
 | **6.7+** | Optimal | Landlock ABI v6 (IPC scoping) |
 
-### Minimum: Linux 5.13
+### Currently chosen target: Linux 6.7+
 
-The absolute minimum kernel version is **5.13**. This is a hard requirement because:
-- Landlock LSM (ABI v1) was introduced in 5.13
-- Landlock is essential to our security model for unprivileged filesystem sandboxing
-- Native OverlayFS in user namespaces requires 5.11+ (satisfied by 5.13 requirement)
+The currently supported minimum kernel version is **6.7**. This is a hard requirement because:
+- Landlock IPC scoping (ABI v6) is required for inter-sandbox isolation
+- Abstract Unix socket scoping prevents cross-sandbox communication
+- Signal scoping prevents signal injection attacks
+- All earlier Landlock features (filesystem, TCP network) are included
 
-**We do not support kernels older than 5.13.**
+**Support for kernels older than 6.7 is planned, but can take a while.**
 
-### Recommended: Linux 6.4
+### Why 6.7?
 
-Kernel 6.4 adds Landlock ABI v4, enabling TCP network restrictions (bind/connect). Without this, network isolation relies solely on network namespaces.
+We chose 6.7 as the minimum because Landlock IPC scoping (ABI v6) is essential for proper sandbox isolation. Without it, sandboxed processes could communicate via abstract Unix sockets or send signals to other processes. Kernel 6.7 includes all earlier Landlock features (filesystem, TCP network).
 
-**Note:** Landlock network restrictions only cover TCP bind/connect operations. UDP, ICMP, and other protocols are NOT restricted by Landlock. Network namespace isolation remains the primary network control.
-
-### Optimal: Linux 6.7+
-
-Kernel 6.7+ provides Landlock ABI v6 with IPC scoping:
-- `LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET` — Restricts connections to abstract Unix sockets
-- `LANDLOCK_SCOPE_SIGNAL` — Restricts signal delivery to processes in the same/nested Landlock domain
-
-These features improve inter-sandbox isolation.
+**Note:** Landlock network restrictions (ABI v4) only cover TCP bind/connect operations. UDP, ICMP, and other protocols are NOT restricted by Landlock. Network namespace isolation remains the primary network control.
 
 ## Verification
 
@@ -50,14 +43,14 @@ dmesg | grep landlock  # Should show "landlock: Up and running"
 
 ## Landlock ABI Version Reference
 
-| ABI | Kernel | Features Added |
-|-----|--------|----------------|
-| v1 | 5.13 | Basic filesystem restrictions |
-| v2 | 5.19 | `LANDLOCK_ACCESS_FS_REFER` (cross-directory rename/link) |
-| v3 | 6.2 | `LANDLOCK_ACCESS_FS_TRUNCATE` |
-| v4 | 6.4 | TCP network restrictions (bind/connect) |
-| v5 | 6.6 | `LANDLOCK_ACCESS_FS_IOCTL_DEV` |
-| v6 | 6.7 | IPC scoping (abstract Unix sockets, signals) |
+| ABI | Kernel | Features Added | Status |
+|-----|--------|----------------|--------|
+| v1 | 5.13 | Basic filesystem restrictions | Included |
+| v2 | 5.19 | `LANDLOCK_ACCESS_FS_REFER` (cross-directory rename/link) | Included |
+| v3 | 6.2 | `LANDLOCK_ACCESS_FS_TRUNCATE` | Included |
+| v4 | 6.4 | TCP network restrictions (bind/connect) | Included |
+| v5 | 6.6 | `LANDLOCK_ACCESS_FS_IOCTL_DEV` | Included |
+| v6 | 6.7 | IPC scoping (abstract Unix sockets, signals) | **Required** |
 
 **Reference:** [Landlock ABI versions](https://docs.kernel.org/userspace-api/landlock.html#landlock-abi-versions)
 
@@ -102,6 +95,8 @@ systemd.unified_cgroup_hierarchy=1
 ```
 
 **Reference:** [cgroups v2 documentation](https://docs.kernel.org/admin-guide/cgroup-v2.html)
+
+**cgroups v2 is required.** The sandbox will refuse to start if cgroups v2 is not available, as resource limits are essential for preventing denial-of-service attacks.
 
 ## Architecture
 
@@ -150,12 +145,14 @@ The MCP server process needs read access to:
 
 | Distribution | Default Kernel | User NS | cgroups v2 | Notes |
 |--------------|----------------|---------|------------|-------|
-| Ubuntu 22.04 LTS | 5.15 | ✓ | ✓ | Minimum supported LTS |
-| Ubuntu 24.04 LTS | 6.8 | ✓ | ✓ | Full Landlock support |
-| Debian 12 | 6.1 | ✓ | ✓ | Good support |
-| Fedora 39+ | 6.5+ | ✓ | ✓ | Full Landlock support |
-| RHEL 9 | 5.14 | Config | ✓ | Enable userns manually |
+| Ubuntu 24.04 LTS | 6.8 | ✓ | ✓ | **Recommended** — meets all requirements |
+| Ubuntu 25.10 | 6.17 | ✓ | ✓ | Full support |
+| Fedora 39+ | 6.5+ | ✓ | ✓ | Fedora 40+ (kernel 6.8+) recommended |
+| Debian 13 (trixie) | 6.x | ✓ | ✓ | When released |
 | Arch Linux | Rolling | Config | ✓ | Enable userns manually |
+| Ubuntu 22.04 LTS | 5.15 | ✓ | ✓ | ❌ Kernel too old |
+| Debian 12 | 6.1 | ✓ | ✓ | ❌ Kernel too old |
+| RHEL 9 | 5.14 | Config | ✓ | ❌ Kernel too old |
 
 ## Checking System Compatibility
 
@@ -173,13 +170,9 @@ MAJOR=$(echo "$KERNEL" | cut -d. -f1)
 MINOR=$(echo "$KERNEL" | cut -d. -f2)
 echo "Kernel: $KERNEL"
 
-if [ "$MAJOR" -lt 5 ] || { [ "$MAJOR" -eq 5 ] && [ "$MINOR" -lt 13 ]; }; then
-    echo "ERROR: Kernel 5.13+ required (Landlock support)"
+if [ "$MAJOR" -lt 6 ] || { [ "$MAJOR" -eq 6 ] && [ "$MINOR" -lt 7 ]; }; then
+    echo "ERROR: Kernel 6.7+ required (Landlock IPC scoping)"
     exit 1
-fi
-
-if [ "$MAJOR" -lt 6 ] || { [ "$MAJOR" -eq 6 ] && [ "$MINOR" -lt 4 ]; }; then
-    echo "WARNING: Kernel 6.4+ recommended for Landlock network restrictions"
 fi
 
 # Landlock
