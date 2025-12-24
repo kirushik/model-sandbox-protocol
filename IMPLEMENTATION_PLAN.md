@@ -29,19 +29,19 @@ A namespace-based sandboxing MCP server for safe AI agent code execution.
 
 ### Checklist
 
-- [ ] **0.1** Update `Cargo.toml` with all dependencies
-- [ ] **0.2** Create `src/lib.rs` with module structure
-- [ ] **0.3** Create `src/error.rs` with error types (thiserror + miette)
-- [ ] **0.4** Create `src/system/mod.rs` and `src/system/requirements.rs`
-- [ ] **0.5** Implement kernel version check (>= 6.7)
-- [ ] **0.6** Implement Landlock ABI v6 check
-- [ ] **0.7** Implement cgroups v2 check
-- [ ] **0.8** Implement unprivileged user namespaces check
-- [ ] **0.9** Create `src/server/mod.rs` and `src/server/handler.rs`
-- [ ] **0.10** Implement basic ServerHandler (no tools yet)
-- [ ] **0.11** Replace `src/main.rs` with CLI and server startup
-- [ ] **0.12** Run `cargo check --quiet && cargo clippy`
-- [ ] **0.13** Write unit tests for system requirements
+- [x] **0.1** Update `Cargo.toml` with all dependencies
+- [x] **0.2** Create `src/lib.rs` with module structure
+- [x] **0.3** Create `src/error.rs` with error types (thiserror + miette)
+- [x] **0.4** Create `src/system/mod.rs` and `src/system/requirements.rs`
+- [x] **0.5** Implement kernel version check (>= 6.7)
+- [x] **0.6** Implement Landlock ABI v6 check
+- [x] **0.7** Implement cgroups v2 check
+- [x] **0.8** Implement unprivileged user namespaces check
+- [x] **0.9** Create `src/server/mod.rs` and `src/server/handler.rs`
+- [x] **0.10** Implement basic ServerHandler (no tools yet)
+- [x] **0.11** Replace `src/main.rs` with CLI and server startup
+- [x] **0.12** Run `cargo check --quiet && cargo clippy`
+- [x] **0.13** Write unit tests for system requirements
 
 ### Files to Create/Modify
 
@@ -81,12 +81,12 @@ tokio-test = "0.4"
 
 ### Acceptance Criteria
 
-- [ ] `cargo check --quiet` passes
-- [ ] `cargo clippy` passes with no warnings
-- [ ] Server starts and responds to MCP `initialize` request
-- [ ] On unsupported systems (kernel < 6.7), server exits with clear error message
-- [ ] System requirements check returns structured diagnostics (pass/fail per check)
-- [ ] Unit tests pass: `cargo test`
+- [x] `cargo check --quiet` passes
+- [x] `cargo clippy` passes with no warnings
+- [x] Server starts and responds to MCP `initialize` request
+- [x] On unsupported systems (kernel < 6.7), server exits with clear error message
+- [x] System requirements check returns structured diagnostics (pass/fail per check)
+- [x] Unit tests pass: `cargo test`
 
 ---
 
@@ -317,6 +317,7 @@ impl SandboxServer {
 
 ### Checklist
 
+- [ ] **4.0** Audit and minimize `unsafe` usage across the codebase (Phase 0–3), consolidate unavoidable `unsafe` into well-reviewed modules, and tighten linting (goal: no `unsafe` outside sandbox/security boundaries)
 - [ ] **4.1** Create `src/sandbox/security.rs` with security primitives
 - [ ] **4.2** Create `src/sandbox/cgroups.rs` with resource limits
 - [ ] **4.3** Implement setsid() for new session (TIOCSTI protection)

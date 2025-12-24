@@ -2,6 +2,17 @@
 
 Namespace-based sandboxing MCP server for safe AI agent code execution. Rust, x86_64 Linux only, kernel 6.7+ required. See `docs/SYSTEM_REQUIREMENTS.md` for full requirements.
 
+## Development Environment Assumptions
+
+For now, we assume the development environment (and CI, if any) **meets the full system requirements**:
+- x86_64 Linux
+- Kernel 6.7+
+- Landlock enabled with ABI v6+ support
+- cgroups v2 mounted (unified hierarchy)
+- Unprivileged user namespaces enabled
+
+This impacts tests and developer workflows: system requirement checks and “real system” tests are allowed to hard-fail when these assumptions are violated.
+
 ## Documentation
 
 - `docs/ARCHITECTURE.md` — system design and component breakdown

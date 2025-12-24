@@ -1,7 +1,55 @@
 [package]
 name = "model-sandbox-protocol"
-authors = [ "Kirill @kirushik Pimenov <kirushik@gmail.com>"]
+authors = ["Kirill @kirushik Pimenov <kirushik@gmail.com>"]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Namespace-based sandboxing MCP server for safe AI agent code execution"
+license = "GPL-3.0-or-later"
 
 [dependencies]
+# Async runtime (required by rmcp)
+tokio = { version = "1", features = ["full"] }
+
+# MCP protocol SDK
+rmcp = { version = "0.12", features = ["server", "macros", "transport-io"] }
+
+# Sandboxing (Phase 1+, declared now for consistency)
+hakoniwa = "1.2"
+
+# Linux system calls
+nix = { version = "0.30", features = ["user", "mount", "sched", "signal", "process"] }
+
+# Landlock LSM
+landlock = "0.4"
+
+# Capabilities
+caps = "0.5"
+
+# Error handling
+thiserror = "2"
+miette = { version = "7", features = ["fancy"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Session IDs
+uuid = { version = "1", features = ["v4"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "warn"
