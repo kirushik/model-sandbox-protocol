@@ -1,0 +1,36 @@
+# Model Sandbox Protocol
+
+Bubblewrap-based sandboxing MCP server for safe AI agent code execution. Rust, x86_64 Linux only (requires kernel 5.13+ for Landlock, unprivileged user namespaces enabled).
+
+## Documentation
+
+- `docs/ARCHITECTURE.md` — system design and component breakdown
+- `docs/LIBRARY_CHOICES.md` — crate decisions, error handling, async runtime
+- `docs/SECURITY_MODEL.md` — threat model and security policy
+- `Implementation notes.md` — early technical research (docs/ takes precedence)
+
+## Available MCP Tools
+
+Use `resolve-library-id` then `get-library-docs` from context7 to fetch up-to-date crate documentation.
+
+Use `sequentialthinking` for complex problem breakdown, security analysis, or multi-step planning.
+
+## Commands
+
+```bash
+cargo check --quiet      # verify compilation (prefer over build)
+cargo clippy             # lint
+cargo test               # run tests (requires unprivileged user namespaces)
+cargo fmt --all          # format
+```
+
+## Workflow
+
+Run `cargo check --quiet && cargo clippy` before committing. Code must compile and pass lints.
+
+## Security Rules
+
+- Never weaken security stance without discussion. If necessary, document rationale in `docs/SECURITY.md` and reference it in code comments.
+- Never write non-trivial code without tests. Add unit tests for new functionality, integration tests for sandbox behavior.
+- Never trust user inputs. Validate all inputs at system boundaries.
+- Never use `unwrap()`. Use `expect("explanation why this cannot fail")` or propagate errors with `?`.
