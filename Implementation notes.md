@@ -1,16 +1,16 @@
 # Building a sandboxed code execution MCP server in Rust
 
-A production-grade MCP server for AI agent code execution is best built using Rust's **rmcp** SDK (2.6k stars, official), combined with Bubblewrap or native Linux namespaces for isolation, fuse-overlayfs for unprivileged CoW filesystems, and layered security via seccomp-bpf, Landlock, and capability dropping. This architecture provides strong isolation without requiring root privileges, making it suitable for deployment alongside AI agents.
+A production-grade MCP server for AI agent code execution is best built using Rust's **rmcp** SDK (official, actively maintained), combined with native Linux namespaces for isolation, native OverlayFS for unprivileged CoW filesystems (kernel 5.13+), and layered security via seccomp-bpf, Landlock, and capability dropping. This architecture provides strong isolation without requiring root privileges, making it suitable for deployment alongside AI agents.
 
 ## MCP protocol fundamentals and Rust SDK options
 
 The Model Context Protocol uses **JSON-RPC 2.0** over newline-delimited messages, supporting three server primitives: **Tools** (executable functions), **Resources** (contextual data), and **Prompts** (templated workflows). The stdio transport reads JSON from stdin and writes to stdout, with logging strictly to stderr.
 
-The official **rmcp** crate (v0.8.5) provides everything needed for Rust implementations. It offers procedural macros for tool definitions, async tokio integration, and multiple transport options (stdio, SSE, WebSocket). A basic sandboxed execution server structure:
+The official **rmcp** crate provides everything needed for Rust implementations. It offers procedural macros for tool definitions, async tokio integration, and multiple transport options (stdio, SSE, streamable HTTP). Supports protocol versions 2024-11-05, 2025-03-26, and 2025-06-18. A basic sandboxed execution server structure:
 
 ```rust
 use rmcp::{ServerHandler, tool, tool_router};
-use tokio::io::{stdin, stdout};
+use rmcp::model::{ServerCapabilities, ServerInfo};
 
 #[derive(Clone)]
 pub struct SandboxServer {
@@ -66,7 +66,7 @@ For a custom sandboxing server, **nsjail** offers the best balance of features a
 
 OverlayFS combines a read-only lower layer with a writable upper layer, presenting a unified view at the merged mountpoint. The **work directory** is mandatory for writable overlays—it stages atomic operations during copy-up.
 
-**Privilege requirements**: Native overlayfs requires `CAP_SYS_ADMIN`, but kernel 5.11+ allows mounting within user namespaces using the `userxattr` option. For older kernels, **fuse-overlayfs** provides unprivileged overlay functionality at the cost of userspace overhead.
+**Privilege requirements**: Native OverlayFS requires `CAP_SYS_ADMIN`, but kernel 5.11+ allows mounting within user namespaces using the `userxattr` option. Since we require kernel 5.13+ (for Landlock), native OverlayFS is always available.
 
 Recommended directory structure for ephemeral sandboxes:
 
@@ -123,7 +123,9 @@ futex, clock_gettime, rt_sigaction, clone, wait4, socket, connect,
 sendto, recvfrom, poll, select, getrandom, exit_group
 ```
 
-In Rust, use `seccompiler` (rust-vmm, no C dependencies) or `libseccomp`:
+**Note**: The socket/connect syscalls are allowed because network isolation is handled by namespaces. In an isolated network namespace, these syscalls succeed but have no external connectivity. If network access is enabled via veth pairs, the allowlist should align with the network policy.
+
+In Rust, use `seccompiler` (rust-vmm, no C dependencies) for custom filters:
 
 ```rust
 use seccompiler::{SeccompAction, SeccompFilter};
@@ -153,11 +155,41 @@ Ruleset::default()
     .restrict_self()?;
 ```
 
+**Critical: Landlock and OverlayFS interaction**
+
+Landlock rules applied to OverlayFS upper/lower layers do NOT automatically apply to the merged view. From kernel documentation: "A policy restricting an OverlayFS layer will not restrict the resulted merged hierarchy, and vice versa."
+
+Always apply Landlock rules to the **merged mount path** that the sandboxed process actually accesses.
+
+### File descriptor hygiene
+
+Landlock and other LSMs only restrict operations on **newly opened** files. File descriptors opened before `landlock_restrict_self()` retain their original permissions.
+
+**Requirements before sandbox entry**:
+1. Close all non-essential FDs inherited from parent
+2. Set `O_CLOEXEC` on any FDs that must remain open (e.g., for communication)
+3. Audit FD inheritance in sandbox entry code path
+4. Never pass host FDs (config files, sockets) to sandboxed process
+
 ### Capability management
 
 Drop all capabilities, especially `CAP_SYS_ADMIN` (near-root access), `CAP_SYS_PTRACE` (sandbox escape vector), and `CAP_NET_ADMIN`. Always set `PR_SET_NO_NEW_PRIVS` to prevent privilege escalation via setuid binaries.
 
-**Implementation order**: Create namespaces → configure network → set up mounts → apply Landlock → set NO_NEW_PRIVS → drop capabilities → install seccomp (last, to not interfere with setup syscalls).
+### Security implementation order
+
+The order of applying security controls is critical. Incorrect ordering can either prevent sandbox setup (by blocking required syscalls too early) or leave security gaps.
+
+**Correct order**:
+1. Create namespaces (user, mount, PID, network, IPC, UTS)
+2. Configure network (veth pairs if egress needed)
+3. Set up mounts (overlay, bind mounts, /proc, /dev)
+4. Close unnecessary file descriptors
+5. Apply Landlock rules (to merged paths, not underlying layers)
+6. Set `NO_NEW_PRIVS` (prevents setuid escalation)
+7. Drop all capabilities
+8. Install seccomp filter (**LAST** — must not block setup syscalls)
+
+**Why seccomp last**: The seccomp filter blocks syscalls. If applied too early, it may block syscalls needed for the setup steps above (mount, setns, prctl, etc.).
 
 ## Prior art and production approaches
 
@@ -191,8 +223,9 @@ Existing MCP sandbox servers include **code-sandbox-mcp** (Docker-based), **Phil
 | **caps** (8M+ downloads) | Pure Rust capability management | Production |
 | **landlock** | Official Landlock LSM bindings | Production |
 | **seccompiler** | Native BPF compilation (rust-vmm) | Production |
-| **unshare** | Process spawning with namespace config | Stable |
-| **hakoniwa** | Integrated sandbox (namespaces + Landlock + seccomp) | Promising |
+| **hakoniwa** | Integrated sandbox (namespaces + Landlock + seccomp + resource limits) | Production (v1.2+) |
+
+**Note on hakoniwa**: The `hakoniwa` crate provides an integrated sandboxing solution that combines namespaces, resource limits, Landlock, and seccomp. It uses `libseccomp` (C bindings) for seccomp filtering. For custom seccomp filters outside hakoniwa's scope, prefer pure-Rust `seccompiler`.
 
 **Rust vs Go for sandboxing**: Rust's explicit threading model handles namespaces cleanly, while Go's M:N goroutine scheduling causes subtle bugs after `unshare()`/`clone()` when namespace changes don't propagate to all goroutines. The youki developers note: "The container runtime requires system calls with special handling in Go. This is tricky; with Rust, it's not that tricky."
 
@@ -203,9 +236,9 @@ Use `tokio::task::spawn_blocking` for namespace/mount operations (blocking sysca
 ```rust
 async fn create_sandbox(config: SandboxConfig) -> Result<SandboxHandle> {
     let sandbox = task::spawn_blocking(move || {
-        unshare::Command::new("/bin/sh")
-            .unshare(&[Namespace::Pid, Namespace::Mount, Namespace::Net])
-            .chroot(&config.rootfs)
+        hakoniwa::Sandbox::new()
+            .unshare(Namespace::Pid | Namespace::Mount | Namespace::Net)
+            .rootfs(&config.rootfs)
             .spawn()
     }).await??;
     
@@ -264,9 +297,9 @@ async fn cleanup_orphaned_session(path: &Path) -> Result<()> {
 For a production MCP sandbox server:
 
 1. **Use rmcp** for MCP protocol with stdio transport
-2. **Native namespaces via `unshare` crate** rather than invoking bwrap as subprocess—reduces attack surface and provides better control
-3. **fuse-overlayfs** for CoW filesystems on kernel <5.11, native overlayfs with `userxattr` otherwise
-4. **Layer security**: user namespace → mount namespace → Landlock → capabilities drop → seccomp-bpf
+2. **Use hakoniwa** for integrated sandboxing (namespaces + Landlock + seccomp + resource limits)
+3. **Native OverlayFS** with `userxattr` for CoW filesystems (requires kernel 5.13+, which is our minimum)
+4. **Layer security in correct order**: namespaces → network → mounts → close FDs → Landlock → NO_NEW_PRIVS → drop caps → seccomp (last)
 5. **Session persistence**: Directory structure at `~/.mcp-sandboxes/{session-id}/workspace` accessible to both host and sandbox
 6. **Network**: Default isolated; if egress needed, veth pair with SNI-filtering transparent proxy
 

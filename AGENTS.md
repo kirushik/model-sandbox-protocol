@@ -1,12 +1,13 @@
 # Model Sandbox Protocol
 
-Bubblewrap-based sandboxing MCP server for safe AI agent code execution. Rust, x86_64 Linux only (requires kernel 5.13+ for Landlock, unprivileged user namespaces enabled).
+Namespace-based sandboxing MCP server for safe AI agent code execution. Rust, x86_64 Linux only. See `docs/SYSTEM_REQUIREMENTS.md` for kernel and host OS requirements.
 
 ## Documentation
 
 - `docs/ARCHITECTURE.md` — system design and component breakdown
 - `docs/LIBRARY_CHOICES.md` — crate decisions, error handling, async runtime
 - `docs/SECURITY_MODEL.md` — threat model and security policy
+- `docs/SYSTEM_REQUIREMENTS.md` — kernel versions, cgroups, host prerequisites
 - `Implementation notes.md` — early technical research (docs/ takes precedence)
 
 ## Available MCP Tools
@@ -30,7 +31,7 @@ Run `cargo check --quiet && cargo clippy` before committing. Code must compile a
 
 ## Security Rules
 
-- Never weaken security stance without discussion. If necessary, document rationale in `docs/SECURITY.md` and reference it in code comments.
+- Never weaken security stance without discussion. If necessary, document rationale in `docs/SECURITY_MODEL.md` and reference it in code comments.
 - Never write non-trivial code without tests. Add unit tests for new functionality, integration tests for sandbox behavior.
 - Never trust user inputs. Validate all inputs at system boundaries.
 - Never use `unwrap()`. Use `expect("explanation why this cannot fail")` or propagate errors with `?`.

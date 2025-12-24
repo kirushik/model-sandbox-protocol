@@ -55,12 +55,14 @@ Sandboxed code execution MCP server for AI agents. Executes untrusted code in is
 
 | Vector | CVE Examples | Mitigation |
 |--------|--------------|------------|
-| **TIOCSTI injection** | CVE-2017-5226 | `--new-session` flag, seccomp block on ioctl 0x5412 |
+| **TIOCSTI injection** | CVE-2017-5226 | `setsid()` for new session, seccomp block on ioctl TIOCSTI |
 | User namespace kernel bugs | CVE-2024-1086, CVE-2023-32233 | Kernel updates, minimize userns if possible |
-| OverlayFS capability bypass | CVE-2023-2640 (Ubuntu) | Avoid Ubuntu-patched kernels, use fuse-overlayfs |
+| OverlayFS capability bypass | CVE-2023-2640 (Ubuntu) | Avoid Ubuntu-patched kernels, keep kernel updated |
 | /proc write escapes | CVE-2022-0492 (cgroups) | Read-only /proc/sys, no cgroup mounts |
 | D-Bus escalation | CVE-2021-4034 | Never bind D-Bus sockets |
-| Symlink races (TOCTOU) | CVE-2025-31133 (runc) | Atomic operations, O_NOFOLLOW |
+| Symlink races (TOCTOU) | CVE-2025-31133 (runc) | Atomic operations, O_NOFOLLOW during setup |
+| **File descriptor inheritance** | — | Close/CLOEXEC all FDs before sandbox entry |
+| **Landlock FD bypass** | — | Landlock doesn't restrict pre-opened FDs; close before restricting |
 
 ### Data Exfiltration
 
@@ -81,31 +83,87 @@ Sandboxed code execution MCP server for AI agents. Executes untrusted code in is
 | Package registry abuse | Exfil via package publish or download params | Monitor unusual registry traffic patterns |
 | Allowed domain piggyback | Discord webhooks, webhook.site if allowed | Strict allowlist, no generic webhook domains |
 
+### IPC-Based Attacks
+
+| Vector | Description | Mitigation |
+|--------|-------------|------------|
+| Abstract Unix sockets | Cross-sandbox communication via abstract namespace | Landlock IPC scoping (ABI v6, kernel 6.7+) |
+| Signal injection | Signals sent to processes outside sandbox | Landlock signal scoping (ABI v6) |
+| Shared memory | `/dev/shm` accessible across namespaces | Fresh tmpfs for /dev/shm, IPC namespace isolation |
+
 ## Security Controls
 
 ### Required (P0/P1 Mitigations)
 
-1. **Namespace isolation**: User, mount, PID, network, IPC, UTS namespaces via `unshare`
-2. **New session**: Always `setsid()` or `--new-session` to prevent TIOCSTI
+1. **Namespace isolation**: User, mount, PID, network, IPC, UTS namespaces via `hakoniwa`
+2. **New session**: Always `setsid()` to prevent TIOCSTI terminal injection
 3. **Credential isolation**: Never bind-mount `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gcloud`
-4. **Seccomp filter**: Block dangerous syscalls (ptrace, mount, init_module, ioctl TIOCSTI)
+4. **File descriptor hygiene**: Close all unnecessary FDs or set `O_CLOEXEC` before fork/exec into sandbox
 5. **Capability drop**: Drop all capabilities, especially CAP_SYS_ADMIN, CAP_SYS_PTRACE
 6. **Fresh /dev**: Mount new devtmpfs, don't expose host TTYs
 7. **Network namespace**: Isolated network; allowlisted egress only if enabled
+8. **NO_NEW_PRIVS**: Set before any other restrictions to prevent privilege escalation via setuid
+9. **Seccomp filter**: Block dangerous syscalls (ptrace, mount, init_module, ioctl TIOCSTI) — applied **last**
 
 ### Recommended (P2/P3 Mitigations)
 
-1. **Landlock**: Filesystem access control as defense-in-depth (kernel 5.13+)
-2. **Read-only base**: OverlayFS lower layer read-only, writes to tmpfs/session upper
-3. **DNS control**: Route through resolving proxy with logging
-4. **Resource limits**: cgroups v2 for CPU, memory, PID limits
-5. **Timeout enforcement**: Kill long-running processes
+1. **Landlock**: Filesystem access control as defense-in-depth (kernel 5.13+); apply to **merged** overlay path
+2. **Landlock IPC scoping**: Restrict abstract Unix sockets and signals (kernel 6.7+, ABI v6)
+3. **Read-only base**: OverlayFS lower layer read-only, writes to tmpfs/session upper
+4. **DNS control**: Route through resolving proxy with logging
+5. **Resource limits**: cgroups v2 for CPU, memory, PID limits
+6. **Timeout enforcement**: Kill long-running processes
 
 ### Configurable (User Choice)
 
 1. **Network access**: Default isolated; opt-in allowlist for package registries
 2. **Package script execution**: Document risks, recommend `--ignore-scripts`
 3. **Session persistence**: Default ephemeral; opt-in persistence with cleanup
+
+## Critical Implementation Details
+
+### Landlock and OverlayFS Interaction
+
+**Important**: Landlock rules applied to OverlayFS upper/lower layers do NOT automatically apply to the merged view. From kernel documentation:
+
+> "A policy restricting an OverlayFS layer will not restrict the resulted merged hierarchy, and vice versa."
+
+**Correct approach**: Apply Landlock rules to the **merged mount path** that the sandboxed process actually accesses, not to the underlying upper/lower directories.
+
+```
+# WRONG: Rules on layers don't protect merged view
+Landlock rule: /sandboxes/session-123/upper → read-only
+Merged at: /sandboxes/session-123/merged → NOT PROTECTED
+
+# CORRECT: Rules on merged path
+Landlock rule: /sandboxes/session-123/merged/sensitive → deny
+```
+
+### File Descriptor Inheritance
+
+Landlock (and other LSMs) only restrict operations on newly opened files. File descriptors opened before `landlock_restrict_self()` retain their original permissions.
+
+**Requirements**:
+1. Close all non-essential FDs before entering sandbox
+2. Set `O_CLOEXEC` on any FDs that must remain open
+3. Audit FD inheritance in sandbox entry code path
+4. Never pass host FDs (config files, sockets) to sandboxed process
+
+### Security Implementation Order
+
+The order of applying security controls matters. Incorrect ordering can either brick the sandbox setup or leave security gaps.
+
+**Correct order**:
+1. Create namespaces (user, mount, PID, network, IPC, UTS)
+2. Configure network (veth pairs if egress needed)
+3. Set up mounts (overlay, bind mounts, /proc, /dev)
+4. Close unnecessary file descriptors
+5. Apply Landlock rules (to merged paths)
+6. Set `NO_NEW_PRIVS` (prevents setuid escalation)
+7. Drop all capabilities
+8. Install seccomp filter (**LAST** — must not block setup syscalls)
+
+**Why seccomp last**: The seccomp filter blocks syscalls. If applied too early, it may block syscalls needed for the setup steps above (mount, setns, prctl, etc.).
 
 ## Sandbox Filesystem Layout
 
@@ -118,8 +176,9 @@ Sandboxed code execution MCP server for AI agents. Executes untrusted code in is
 ├── tmp/                    # Writable (tmpfs)
 ├── home/sandbox/          # Writable (overlay upper)
 │   └── workspace/         # Bind-mount to project (overlay for writes)
-├── proc/                   # Fresh procfs (hidepid=2 if possible)
+├── proc/                   # Fresh procfs (hidepid=invisible)
 ├── dev/                    # Fresh devtmpfs (minimal devices)
+│   └── shm/               # Fresh tmpfs (IPC isolation)
 └── sys/                    # Read-only or masked
 
 Host-side session storage:
@@ -140,20 +199,24 @@ Threats we explicitly do NOT defend against:
 - **Pre-sandbox attacks**: Vulnerabilities in MCP server itself before sandboxing
 - **Cryptographic attacks**: Not in scope for this project
 
+
 ## Implementation Checklist
 
-Before any sandbox execution:
+Before any sandbox execution, in this order:
 
-- [ ] New session established (setsid)
-- [ ] All namespaces unshared
-- [ ] Seccomp filter installed
+- [ ] All namespaces unshared (user, mount, PID, network, IPC, UTS)
+- [ ] New session established (`setsid`)
+- [ ] Network configured (isolated or veth with allowlist)
+- [ ] Filesystem mounts prepared (overlay merged view)
+- [ ] Credential paths verified not mounted
+- [ ] All unnecessary file descriptors closed
+- [ ] Landlock rules applied to merged paths (if kernel supports)
+- [ ] Landlock IPC scoping enabled (if kernel 6.7+)
+- [ ] `NO_NEW_PRIVS` set via `prctl`
 - [ ] All capabilities dropped
-- [ ] NO_NEW_PRIVS set
-- [ ] Credential paths not mounted
-- [ ] Network isolated or allowlisted
-- [ ] Landlock rules applied (if available)
-- [ ] Resource limits set
+- [ ] Resource limits set (cgroups v2)
 - [ ] Timeout scheduled
+- [ ] Seccomp filter installed (**last step**)
 
 ## Testing Requirements
 
@@ -162,9 +225,12 @@ Security-critical tests:
 1. **TIOCSTI blocked**: Attempt terminal injection from sandbox, verify no effect
 2. **Credential inaccessible**: Verify `~/.ssh/*` not readable from sandbox
 3. **Network isolated**: Verify no connectivity when disabled; only allowlist when enabled
-4. **Capability verification**: Verify `capsh --print` shows empty set
+4. **Capability verification**: Verify `capsh --print` shows empty set in sandbox
 5. **Seccomp enforcement**: Verify blocked syscalls return EPERM/SIGSYS
 6. **Escape regression tests**: Reproduce known CVE patterns, verify blocked
+7. **FD inheritance**: Verify no unexpected FDs inherited by sandboxed process (`ls -la /proc/self/fd/`)
+8. **Landlock merged path**: Verify Landlock restrictions apply to overlay merged view
+9. **IPC isolation**: Verify abstract Unix socket connections fail across sandbox boundaries (kernel 6.7+)
 
 ## Incident Response
 

@@ -2,6 +2,14 @@
 
 This document captures crate selection decisions and their rationale.
 
+## Versioning Policy
+
+**Default**: Use the latest stable release of libraries published on crates.io.
+
+When a specific version is pinned or a newer version is explicitly avoided, document:
+1. The reason for the override
+2. A review date (TTL) to reconsider the decision
+
 ## Selection Principles
 
 When choosing dependencies:
@@ -12,20 +20,20 @@ When choosing dependencies:
 
 ## Core Dependencies
 
-### Async Runtime: `smol`
+### Async Runtime: `tokio`
 
-Lightweight async runtime instead of full tokio. Appropriate for a lean, local-only tool.
+The standard async runtime for Rust. Required by `rmcp` (the MCP SDK), so we use it directly rather than adding a compatibility layer with an alternative runtime.
 
 ### Error Handling: `miette` + `thiserror`
 
 - `thiserror` for defining error types with derive macros
 - `miette` for rich diagnostic output (useful for CLI/MCP error reporting)
 
-This is the modern Rust error handling stack as of late 2025.
+This is the modern Rust error handling stack.
 
 ### MCP Protocol: `rmcp`
 
-The official Rust MCP SDK. No mature alternatives exist.
+The official Rust MCP SDK. No mature alternatives exist. Actively maintained with support for multiple protocol versions (2024-11-05, 2025-03-26, 2025-06-18).
 
 ### Sandboxing & Linux APIs
 
@@ -35,19 +43,19 @@ The official Rust MCP SDK. No mature alternatives exist.
 | Capabilities | `caps` | Pure Rust, no C dependencies |
 | Landlock LSM | `landlock` | Official bindings |
 | Seccomp BPF | `seccompiler` | rust-vmm, no C dependencies |
-| Namespace spawning | `unshare` | Consider `hakoniwa` if it matures |
+| Integrated sandbox | `hakoniwa` | Namespaces + Landlock + seccomp + resource limits |
+
+**Note on hakoniwa**: This crate provides an integrated sandboxing solution combining namespaces, resource limits, Landlock, and seccomp. It uses `libseccomp` (C bindings) rather than pure-Rust `seccompiler`. We accept this trade-off for the integrated functionality. For custom seccomp filters outside hakoniwa's scope, prefer `seccompiler`.
 
 ### Filesystem
 
 For CoW overlay filesystems:
-- Native overlayfs with `userxattr` on kernel 5.11+
-- `fuse-overlayfs` fallback for older kernels (when we come around to supporting them)
+- Native OverlayFS with `userxattr` option (requires kernel 5.13+, which is our minimum)
 
 ## Crates to Avoid
 
-- `tokio` — too heavy for our use case; use `smol`
 - `libc` directly — prefer `nix` for safety
-- `libseccomp` bindings — prefer pure Rust `seccompiler`
+- `unshare` — unmaintained since 2021; use `hakoniwa` instead
 
 ## Adding New Dependencies
 
