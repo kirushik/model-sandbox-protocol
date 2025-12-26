@@ -29,6 +29,16 @@ pub enum Error {
     #[diagnostic(code(msp::sandbox))]
     Sandbox(#[from] SandboxError),
 
+    /// Session error
+    #[error("Session error")]
+    #[diagnostic(code(msp::session))]
+    Session(#[from] SessionError),
+
+    /// Mount error
+    #[error("Mount error")]
+    #[diagnostic(code(msp::mount))]
+    Mount(#[from] MountError),
+
     /// I/O error
     #[error("I/O error: {0}")]
     #[diagnostic(code(msp::io))]
@@ -137,7 +147,104 @@ pub enum SandboxError {
     #[error("Failed to decode command output as UTF-8: {context}")]
     #[diagnostic(code(msp::sandbox::encoding))]
     OutputEncodingError { context: String },
+
+    /// Mount-related error
+    #[error("Mount error")]
+    #[diagnostic(code(msp::sandbox::mount))]
+    Mount(#[from] MountError),
+
+    /// Session-related error
+    #[error("Session error")]
+    #[diagnostic(code(msp::sandbox::session))]
+    Session(#[from] SessionError),
+}
+
+/// Errors related to session management.
+#[derive(Error, Debug, Diagnostic)]
+pub enum SessionError {
+    /// Session not found
+    #[error("Session not found: {id}")]
+    #[diagnostic(code(msp::session::not_found))]
+    NotFound { id: String },
+
+    /// Session already exists
+    #[error("Session already exists: {id}")]
+    #[diagnostic(code(msp::session::exists))]
+    AlreadyExists { id: String },
+
+    /// Session has expired
+    #[error("Session has expired: {id}")]
+    #[diagnostic(code(msp::session::expired))]
+    Expired { id: String },
+
+    /// Invalid session state or data
+    #[error("Invalid session: {reason}")]
+    #[diagnostic(code(msp::session::invalid))]
+    InvalidSession { reason: String },
+
+    /// I/O error during session operations
+    #[error("Session I/O error: {context}")]
+    #[diagnostic(code(msp::session::io))]
+    IoError {
+        context: String,
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// Session is in use and cannot be modified
+    #[error("Session is in use: {id}")]
+    #[diagnostic(code(msp::session::in_use))]
+    InUse { id: String },
+}
+
+/// Errors related to mount operations.
+#[derive(Error, Debug, Diagnostic)]
+pub enum MountError {
+    /// Failed to mount OverlayFS
+    #[error("Failed to mount OverlayFS: {0}")]
+    #[diagnostic(
+        code(msp::mount::overlay),
+        help("Ensure kernel 5.11+ with unprivileged OverlayFS support")
+    )]
+    OverlayMount(String),
+
+    /// Failed to mount procfs
+    #[error("Failed to mount procfs: {0}")]
+    #[diagnostic(code(msp::mount::proc))]
+    ProcMount(String),
+
+    /// Failed to mount devfs
+    #[error("Failed to mount devfs: {0}")]
+    #[diagnostic(code(msp::mount::dev))]
+    DevMount(String),
+
+    /// Failed to mount tmpfs
+    #[error("Failed to mount tmpfs: {0}")]
+    #[diagnostic(code(msp::mount::tmpfs))]
+    TmpfsMount(String),
+
+    /// Failed to unmount filesystem
+    #[error("Failed to unmount: {0}")]
+    #[diagnostic(code(msp::mount::unmount))]
+    Unmount(String),
+
+    /// Failed to create bind mount
+    #[error("Failed to create bind mount: {0}")]
+    #[diagnostic(code(msp::mount::bind))]
+    BindMount(String),
+
+    /// Security validation failed
+    #[error("Security validation failed: {0}")]
+    #[diagnostic(
+        code(msp::mount::security),
+        help("Credential paths must never be accessible from sandbox")
+    )]
+    SecurityViolation(String),
 }
 
 /// Result type alias for this crate.
 pub type Result<T> = std::result::Result<T, Error>;
+
+// Re-export error types for convenience
+pub use MountError as MountErr;
+pub use SessionError as SessionErr;

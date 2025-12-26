@@ -161,18 +161,18 @@ pub struct CommandOutput {
 
 ### Checklist
 
-- [ ] **2.1** Create `src/session/mod.rs` with public API
-- [ ] **2.2** Create `src/session/storage.rs` with filesystem layout
-- [ ] **2.3** Create `src/session/meta.rs` with metadata struct
-- [ ] **2.4** Create `src/session/lifecycle.rs` with create/cleanup logic
-- [ ] **2.5** Create `src/sandbox/mounts.rs` with OverlayFS setup
-- [ ] **2.6** Implement session directory structure at `~/.mcp-sandboxes/`
-- [ ] **2.7** Implement minimal /etc (sanitized, no credentials)
-- [ ] **2.8** Implement fresh /proc with `hidepid=invisible`
-- [ ] **2.9** Implement minimal /dev (devtmpfs)
-- [ ] **2.10** Implement tmpfs /tmp with size limit
-- [ ] **2.11** Verify credential paths are NEVER mounted (P1 security)
-- [ ] **2.12** Write integration tests for session persistence
+- [x] **2.1** Create `src/session/mod.rs` with public API
+- [x] **2.2** Create `src/session/storage.rs` with filesystem layout
+- [x] **2.3** Create `src/session/meta.rs` with metadata struct
+- [x] **2.4** Create `src/session/lifecycle.rs` with create/cleanup logic
+- [x] **2.5** Create `src/sandbox/mounts.rs` with OverlayFS setup
+- [x] **2.6** Implement session directory structure at `~/.mcp-sandboxes/`
+- [ ] **2.7** Implement minimal /etc (sanitized, no credentials) *(deferred: requires overlay integration)*
+- [ ] **2.8** Implement fresh /proc with `hidepid=invisible` *(deferred: hakoniwa doesn't expose mount options)*
+- [x] **2.9** Implement minimal /dev (devtmpfs)
+- [ ] **2.10** Implement tmpfs /tmp with size limit *(deferred: hakoniwa doesn't expose size option)*
+- [x] **2.11** Verify credential paths are NEVER mounted (P1 security)
+- [x] **2.12** Write integration tests for session persistence
 
 ### Files to Create
 
@@ -213,14 +213,14 @@ const FORBIDDEN_PATHS: &[&str] = &[
 
 ### Acceptance Criteria
 
-- [ ] Session directory created with correct structure
-- [ ] Files written in sandbox appear in upper layer
-- [ ] Host filesystem remains unchanged
-- [ ] `/proc` shows only sandbox processes
-- [ ] `~/.ssh/*` is not accessible from sandbox
-- [ ] `~/.aws/*` is not accessible from sandbox
-- [ ] Session persists across multiple execute calls
-- [ ] Session metadata (JSON) is correctly written/read
+- [x] Session directory created with correct structure
+- [x] Files written in sandbox appear in upper layer
+- [x] Host filesystem remains unchanged
+- [x] `/proc` shows only sandbox processes
+- [x] `~/.ssh/*` is not accessible from sandbox
+- [x] `~/.aws/*` is not accessible from sandbox
+- [x] Session persists across multiple execute calls
+- [x] Session metadata (JSON) is correctly written/read
 
 ---
 

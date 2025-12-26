@@ -8,15 +8,21 @@
 //! - IPC namespace (isolated System V IPC)
 //! - UTS namespace (isolated hostname)
 //!
-//! # Filesystem model (Phase 1)
+//! # Filesystem model
 //!
-//! Phase 1 prioritizes “it works everywhere” namespace isolation and command execution.
-//! We therefore use hakoniwa’s `rootfs("/")` convenience, which bind-mounts a limited set of host
+//! ## Phase 1 (without sessions)
+//!
+//! Uses hakoniwa's `rootfs("/")` convenience, which bind-mounts a limited set of host
 //! directories (`/bin`, `/etc`, `/lib`, `/lib64`, `/lib32`, `/sbin`, `/usr`) read-only into the new
 //! mount namespace.
 //!
-//! This is not the final filesystem/session model (Phase 2 will move to per-session overlay roots),
-//! but it restores broad command compatibility for the current test suite.
+//! ## Phase 2 (with sessions)
+//!
+//! When a `Session` is provided, the sandbox uses OverlayFS to create an isolated,
+//! persistent filesystem:
+//! - Lower layer: Read-only host directories
+//! - Upper layer: Per-session writable layer (persists across executions)
+//! - Merged view: Combined filesystem presented to sandboxed process
 //!
 //! # Future: Network Egress (Item 1.7)
 //!
@@ -51,10 +57,12 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 
 use hakoniwa::{Container, Namespace, Stdio};
-use tracing::{debug, instrument, trace};
+use tracing::{debug, instrument, trace, warn};
 
 use super::SandboxConfig;
+use super::workspace::{WORKSPACE_MOUNT_POINT, WorkspaceConfig, prepare_workspace};
 use crate::error::SandboxError;
+use crate::session::Session;
 
 /// Global semaphore to serialize namespace/mount creation during sandbox setup.
 ///
@@ -115,29 +123,97 @@ impl CommandOutput {
 /// ```
 pub struct SandboxContainer {
     config: SandboxConfig,
+    /// Optional session for persistent filesystem state.
+    session: Option<Session>,
 }
 
 impl SandboxContainer {
     /// Creates a new sandbox container with the given configuration.
+    ///
+    /// This creates a sandbox without session support. Files written during
+    /// execution will not persist after the sandbox exits.
     ///
     /// # Errors
     ///
     /// Returns `SandboxError::CreationFailed` if the sandbox cannot be initialized.
     #[instrument(skip(config), fields(session_id = ?config.session_id))]
     pub fn new(config: SandboxConfig) -> Result<Self, SandboxError> {
-        debug!("Creating new sandbox container");
-        Ok(Self { config })
+        debug!("Creating new sandbox container (no session)");
+        Ok(Self {
+            config,
+            session: None,
+        })
+    }
+
+    /// Creates a new sandbox container with session support.
+    ///
+    /// When a session is provided, the sandbox uses the session's OverlayFS
+    /// filesystem, allowing files to persist across multiple executions.
+    ///
+    /// # Arguments
+    ///
+    /// * `session` - The session to use for persistent storage
+    /// * `config` - Optional configuration overrides (defaults applied if None)
+    ///
+    /// # Errors
+    ///
+    /// Returns `SandboxError::CreationFailed` if the sandbox cannot be initialized.
+    #[instrument(skip(session, config), fields(session_id = %session.id))]
+    pub fn with_session(
+        session: Session,
+        config: Option<SandboxConfig>,
+    ) -> Result<Self, SandboxError> {
+        debug!("Creating sandbox container with session");
+
+        let config = config.unwrap_or_default();
+
+        Ok(Self {
+            config,
+            session: Some(session),
+        })
+    }
+
+    /// Returns a reference to the session, if any.
+    #[must_use]
+    pub fn session(&self) -> Option<&Session> {
+        self.session.as_ref()
+    }
+
+    /// Returns true if this sandbox has a session attached.
+    #[must_use]
+    pub fn has_session(&self) -> bool {
+        self.session.is_some()
     }
 
     /// Builds a hakoniwa container with the configured namespace isolation.
     ///
     /// Note: Container is rebuilt for each `execute()` call because hakoniwa
     /// consumes it when creating a Command.
+    ///
+    /// # Setup Pipeline
+    ///
+    /// The sandbox setup follows this order:
+    /// 1. Namespace creation (user, mount, pid, net, ipc, uts)
+    /// 2. Filesystem setup (rootfs or session merged directory)
+    /// 3. Standard mounts (/proc, /dev, /tmp)
+    /// 4. Workspace bind mount (if configured)
+    ///
+    /// ## Phase 4 TODO: Security Hardening
+    ///
+    /// After filesystem setup and before exec, Phase 4 will add:
+    /// 1. Close inherited file descriptors (except stdin/stdout/stderr)
+    /// 2. Apply Landlock filesystem restrictions on merged root
+    /// 3. Set PR_SET_NO_NEW_PRIVS
+    /// 4. Drop all capabilities
+    /// 5. Apply seccomp-bpf filter
+    ///
+    /// These must be applied in this exact order for correct security.
     #[instrument(skip(self))]
     fn build_container(&self) -> Result<Container, SandboxError> {
         trace!("Building hakoniwa container");
         let mut container = Container::new();
 
+        // ===== Phase 1: Namespace Isolation =====
         // Additional namespace isolation beyond hakoniwa defaults
         container
             .unshare(Namespace::Ipc) // IPC isolation (System V IPC, POSIX message queues)
@@ -146,19 +222,89 @@ impl SandboxContainer {
 
         container.hostname(&self.config.hostname);
 
-        // Use hakoniwa's rootfs helper for Phase 1 compatibility.
-        // IMPORTANT: When host_path is "/", hakoniwa only bind-mounts:
-        // `/bin`, `/etc`, `/lib`, `/lib64`, `/lib32`, `/sbin`, `/usr`.
-        container
-            .rootfs("/")
-            .map_err(|e| SandboxError::CreationFailed(format!("failed to set rootfs: {e}")))?;
+        // ===== Phase 2: Filesystem Setup =====
+        // Configure filesystem based on whether we have a session
+        if let Some(session) = &self.session {
+            // Phase 2: Use session's merged directory as root
+            // Note: For full OverlayFS support, the overlay should be mounted
+            // in the child's mount namespace. Currently we use the session's
+            // merged directory directly (which works if overlay is pre-mounted
+            // or for testing with the upper directory as workspace).
+            //
+            // TODO: Integrate overlay mounting into namespace setup for proper
+            // unprivileged OverlayFS in user namespace.
+            trace!(merged_path = %session.paths.merged.display(), "Using session filesystem");
 
+            container.rootdir(&session.paths.merged);
+        } else {
+            // Phase 1 compatibility: Use hakoniwa's rootfs helper
+            // IMPORTANT: When host_path is "/", hakoniwa only bind-mounts:
+            // `/bin`, `/etc`, `/lib`, `/lib64`, `/lib32`, `/sbin`, `/usr`.
+            container
+                .rootfs("/")
+                .map_err(|e| SandboxError::CreationFailed(format!("failed to set rootfs: {e}")))?;
+        }
+
+        // ===== Phase 3: Standard Mounts =====
         // Fresh mounts for dev/tmp. We also mount proc explicitly so the mount point is guaranteed,
         // regardless of kernel/host behavior (even though Container::new mounts /proc already).
+        // Note: hakoniwa's procfsmount does not support hidepid option directly.
+        // TODO: For hidepid=invisible support, we may need to mount proc manually
+        // after namespace setup using our mount_proc() helper.
         container
             .procfsmount("/proc")
             .devfsmount("/dev")
             .tmpfsmount("/tmp");
+
+        // ===== Phase 4: Workspace Mount =====
+        // If a workspace path is configured, validate and bind-mount it
+        if let Some(workspace_path) = &self.config.workspace_path {
+            let workspace_config = WorkspaceConfig::new(workspace_path);
+
+            match prepare_workspace(&workspace_config) {
+                Ok(prepared) => {
+                    debug!(
+                        host_path = %prepared.canonical_path.display(),
+                        mount_point = %prepared.mount_point,
+                        "Mounting workspace"
+                    );
+
+                    // Use hakoniwa's bind mount helper
+                    // bindmount_rw mounts the host path at the specified location in sandbox
+                    let host_path_str = prepared.canonical_path.to_string_lossy();
+                    container.bindmount_rw(&host_path_str, WORKSPACE_MOUNT_POINT);
+
+                    trace!("Workspace bind mount configured");
+                }
+                Err(e) => {
+                    // Workspace validation failed - this is a security-critical error
+                    return Err(SandboxError::Mount(e));
+                }
+            }
+        }
+
+        // ===== Phase 4 TODO: Security Hardening (not yet implemented) =====
+        // The following security measures will be added in Phase 4:
+        //
+        // 1. FD Closing: Close all file descriptors > 2 to prevent FD leaks
+        //    container.close_fds_above(2);
+        //
+        // 2. Landlock: Apply filesystem access restrictions
+        //    let ruleset = landlock::Ruleset::new()
+        //        .handle_access(AccessFs::Execute | AccessFs::ReadFile | ...)?
+        //        .create()?;
+        //    ruleset.add_rule(PathBeneath::new(merged_root, access))?;
+        //    ruleset.restrict_self()?;
+        //
+        // 3. No New Privs: Prevent privilege escalation via setuid/setgid
+        //    prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+        //
+        // 4. Capability Dropping: Drop all capabilities
+        //    caps::clear(None, CapSet::Permitted)?;
+        //    caps::clear(None, CapSet::Effective)?;
+        //
+        // 5. Seccomp: Apply syscall filter
+        //    seccomp::apply_filter(&SANDBOX_SECCOMP_POLICY)?;
 
         trace!("Container build complete");
         Ok(container)
@@ -251,8 +397,17 @@ impl SandboxContainer {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        // Set working directory if configured
-        if let Some(workdir) = &self.config.working_dir {
+        // Set working directory
+        // Default to /workspace if workspace is mounted and no explicit working_dir
+        let effective_workdir = self.config.working_dir.clone().or_else(|| {
+            if self.config.workspace_path.is_some() {
+                Some(std::path::PathBuf::from(WORKSPACE_MOUNT_POINT))
+            } else {
+                None
+            }
+        });
+
+        if let Some(workdir) = &effective_workdir {
             cmd.current_dir(workdir);
         }
 
@@ -378,6 +533,16 @@ impl SandboxContainer {
     #[must_use]
     pub fn config(&self) -> &SandboxConfig {
         &self.config
+    }
+}
+
+impl std::fmt::Debug for SandboxContainer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SandboxContainer")
+            .field("config", &self.config)
+            .field("has_session", &self.session.is_some())
+            .field("session_id", &self.session.as_ref().map(|s| s.id))
+            .finish()
     }
 }
 

@@ -30,8 +30,12 @@
 pub mod error;
 pub mod sandbox;
 pub mod server;
+pub mod session;
 pub mod system;
 
 // Re-export commonly used types
-pub use error::{Error, Result};
-pub use sandbox::{CommandOutput, SandboxConfig, SandboxContainer};
+pub use error::{Error, MountError, Result, SessionError};
+pub use sandbox::{CommandOutput, MountConfig, SandboxConfig, SandboxContainer};
+pub use session::{
+    Session, SessionConfig, SessionId, SessionManager, SessionMetadata, SessionPaths, SessionState,
+};
