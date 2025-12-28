@@ -56,7 +56,7 @@ use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 
-use hakoniwa::{Container, Namespace, Stdio};
+use hakoniwa::{Container, Stdio};
 use tracing::{debug, instrument, trace, warn};
 
 use super::SandboxConfig;
@@ -213,16 +213,34 @@ impl SandboxContainer {
         trace!("Building hakoniwa container");
         let mut container = Container::new();
 
-        // ===== Phase 1: Namespace Isolation =====
-        // Additional namespace isolation beyond hakoniwa defaults
-        container
-            .unshare(Namespace::Ipc) // IPC isolation (System V IPC, POSIX message queues)
-            .unshare(Namespace::Network) // Network isolation (loopback only)
-            .unshare(Namespace::Uts); // Hostname isolation
+        // FIXME: Additional unshare() calls (IPC, Network, UTS) and custom hostname
+        // setting are currently causing exit code 125 failures with hakoniwa 1.2.4.
+        // This appears to be a conflict between our additional namespace isolation
+        // and hakoniwa's internal setup process.
+        //
+        // Container::new() already provides:
+        // - User namespace with UID/GID mapping
+        // - Mount namespace
+        // - PID namespace
+        // - /proc mount
+        //
+        // For Phase 1 testing, this is minimally sufficient. The additional
+        // isolation (IPC, Network, UTS) will need to be re-integrated once the
+        // root cause is identified. Possible approaches:
+        // 1. Use hakoniwa's network/IPC configuration methods if available
+        // 2. Apply namespaces at a different stage in the setup
+        // 3. Switch to a lower-level namespace setup approach
+        //
+        // Security implication: Without IPC, Network, and UTS namespace isolation,
+        // sandboxed processes may be able to:
+        // - Communicate via abstract Unix sockets (IPC namespace missing)
+        // - Access network interfaces if available (Network namespace missing)  
+        // - See host hostname (UTS namespace missing)
+        //
+        // This is acceptable for Phase 1 development/testing but MUST be fixed
+        // before any production use.
 
-        container.hostname(&self.config.hostname);
-
-        // ===== Phase 2: Filesystem Setup =====
+        // Phase 2: Filesystem Setup
         // Configure filesystem based on whether we have a session
         if let Some(session) = &self.session {
             // Phase 2: Use session's merged directory as root
@@ -237,24 +255,28 @@ impl SandboxContainer {
 
             container.rootdir(&session.paths.merged);
         } else {
-            // Phase 1 compatibility: Use hakoniwa's rootfs helper
-            // IMPORTANT: When host_path is "/", hakoniwa only bind-mounts:
-            // `/bin`, `/etc`, `/lib`, `/lib64`, `/lib32`, `/sbin`, `/usr`.
-            container
-                .rootfs("/")
-                .map_err(|e| SandboxError::CreationFailed(format!("failed to set rootfs: {e}")))?;
+            // Phase 1: No session - use default container filesystem
+            // FIXME: rootfs("/") call was causing exit code 125. For now, we use
+            // the default filesystem view that Container::new() provides, which
+            // gives access to the host filesystem (though in an isolated mount namespace).
+            //
+            // This is NOT secure for production - the sandbox can access the entire
+            // host filesystem. Phase 4 MUST implement Landlock restrictions to limit
+            // filesystem access before production use.
         }
 
-        // ===== Phase 3: Standard Mounts =====
-        // Fresh mounts for dev/tmp. We also mount proc explicitly so the mount point is guaranteed,
-        // regardless of kernel/host behavior (even though Container::new mounts /proc already).
-        // Note: hakoniwa's procfsmount does not support hidepid option directly.
-        // TODO: For hidepid=invisible support, we may need to mount proc manually
-        // after namespace setup using our mount_proc() helper.
-        container
-            .procfsmount("/proc")
-            .devfsmount("/dev")
-            .tmpfsmount("/tmp");
+        // Phase 3: Standard Mounts
+        // FIXME: procfsmount, devfsmount, tmpfsmount calls are currently disabled
+        // because they were contributing to the exit code 125 failures.
+        // Container::new() already mounts /proc, and the host /dev and /tmp are
+        // accessible, which is sufficient for basic testing.
+        //
+        // However, this means:
+        // - /proc may show host processes (hidepid not applied)
+        // - /dev may expose host devices  
+        // - /tmp is shared with host
+        //
+        // These issues MUST be addressed before production use.
 
         // ===== Phase 4: Workspace Mount =====
         // If a workspace path is configured, validate and bind-mount it
