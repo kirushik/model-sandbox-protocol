@@ -343,6 +343,15 @@ mod tests {
 
         if let Some(home) = &guard.home_dir {
             let ssh_path = home.join(".ssh");
+            
+            // Create the directory if it doesn't exist (for CI environments)
+            let _cleanup = if !ssh_path.exists() {
+                std::fs::create_dir_all(&ssh_path).ok();
+                Some(ssh_path.clone())
+            } else {
+                None
+            };
+            
             let result = guard.validate_mount_source(&ssh_path);
             assert!(result.is_err(), "should reject .ssh directory");
 
@@ -352,6 +361,11 @@ mod tests {
                     "error should mention forbidden: {}",
                     msg
                 );
+            }
+            
+            // Cleanup test directory if we created it
+            if let Some(path) = _cleanup {
+                let _ = std::fs::remove_dir(&path);
             }
         }
     }
