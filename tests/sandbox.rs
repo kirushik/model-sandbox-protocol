@@ -448,3 +448,162 @@ fn test_parallel_sandbox_stress() {
         total_expected, total_success
     );
 }
+
+/// Test that common tools required by sandbox file operations are available.
+///
+/// These tools are used by sandbox_read_file, sandbox_write_file, and sandbox_execute
+/// operations. If any are missing, the sandbox cannot function properly.
+#[test]
+fn test_common_tools_available() {
+    let config = SandboxConfig::default();
+    let sandbox = SandboxContainer::new(config).expect("Failed to create sandbox");
+
+    // Test /bin/sh (required for shell commands and file operations)
+    let output = sandbox
+        .execute("which", &["sh"])
+        .expect("Failed to execute which sh");
+    assert!(
+        output.success(),
+        "sh should be available. stderr: {}",
+        output.stderr
+    );
+    assert!(
+        output.stdout.contains("/sh"),
+        "sh should be in path: {}",
+        output.stdout
+    );
+
+    // Test mkdir (required for creating parent directories in write operations)
+    let output = sandbox
+        .execute("which", &["mkdir"])
+        .expect("Failed to execute which mkdir");
+    assert!(
+        output.success(),
+        "mkdir should be available. stderr: {}",
+        output.stderr
+    );
+
+    // Test cat (required for read operations)
+    let output = sandbox
+        .execute("which", &["cat"])
+        .expect("Failed to execute which cat");
+    assert!(
+        output.success(),
+        "cat should be available. stderr: {}",
+        output.stderr
+    );
+
+    // Test tee (preferred for write operations)
+    let output = sandbox
+        .execute("which", &["tee"])
+        .expect("Failed to execute which tee");
+    assert!(
+        output.success(),
+        "tee should be available. stderr: {}",
+        output.stderr
+    );
+
+    // Test env (useful for debugging and environment inspection)
+    let output = sandbox
+        .execute("which", &["env"])
+        .expect("Failed to execute which env");
+    assert!(
+        output.success(),
+        "env should be available. stderr: {}",
+        output.stderr
+    );
+
+    // Test stat (required for file size checks in read operations)
+    let output = sandbox
+        .execute("which", &["stat"])
+        .expect("Failed to execute which stat");
+    assert!(
+        output.success(),
+        "stat should be available. stderr: {}",
+        output.stderr
+    );
+}
+
+/// Test that common tools actually work as expected inside the sandbox.
+///
+/// Note: Each sandbox.execute() runs in a fresh namespace, so file operations
+/// must be combined into a single shell command to test persistence.
+#[test]
+fn test_common_tools_functional() {
+    let config = SandboxConfig::default();
+    let sandbox = SandboxContainer::new(config).expect("Failed to create sandbox");
+
+    // Test mkdir -p, tee, cat, and stat in a single shell command
+    // This validates the full file write/read cycle that sandbox_write_file and
+    // sandbox_read_file depend on.
+    let output = sandbox
+        .execute(
+            "sh",
+            &[
+                "-c",
+                r#"
+                set -e
+                mkdir -p /tmp/test/nested/dir
+                echo -n "test content" > /tmp/test/nested/file.txt
+                cat /tmp/test/nested/file.txt
+                echo ""
+                stat -c %s /tmp/test/nested/file.txt
+                "#,
+            ],
+        )
+        .expect("Failed to execute combined file operations");
+
+    assert!(
+        output.success(),
+        "Combined file operations should succeed. exit={} stderr: {}",
+        output.exit_code,
+        output.stderr
+    );
+
+    let lines: Vec<&str> = output.stdout.lines().collect();
+    assert!(
+        lines.len() >= 2,
+        "Should have at least 2 lines of output, got: {:?}",
+        lines
+    );
+    assert_eq!(
+        lines[0], "test content",
+        "cat should return written content"
+    );
+    assert_eq!(lines[1], "12", "stat should return correct file size");
+
+    // Test tee separately (writes to stdout as well as file)
+    let output = sandbox
+        .execute(
+            "sh",
+            &[
+                "-c",
+                r#"echo -n "tee test" | tee /tmp/tee_out.txt && cat /tmp/tee_out.txt"#,
+            ],
+        )
+        .expect("Failed to execute tee test");
+    assert!(
+        output.success(),
+        "tee should succeed. stderr: {}",
+        output.stderr
+    );
+    // tee outputs to stdout, then cat outputs the same - so we get "tee testtee test"
+    assert!(
+        output.stdout.contains("tee test"),
+        "tee should write and echo content: {}",
+        output.stdout
+    );
+
+    // Test env (list environment)
+    let output = sandbox.execute("env", &[]).expect("Failed to execute env");
+    assert!(
+        output.success(),
+        "env should succeed. stderr: {}",
+        output.stderr
+    );
+    // env should output at least PATH
+    assert!(
+        output.stdout.contains("PATH="),
+        "env should show PATH variable"
+    );
+}

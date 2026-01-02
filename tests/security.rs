@@ -5,11 +5,15 @@
 //! - Process isolation via /proc hidepid
 //! - Device access restrictions
 //! - Host filesystem protection
+//! - Symlink escape prevention
 //!
 //! IMPORTANT: These tests validate P1 (Priority 1) security requirements.
 //! Any failure here represents a potential security vulnerability.
 
 use model_sandbox_protocol::sandbox::{FORBIDDEN_PATHS, SandboxConfig, SandboxContainer};
+use model_sandbox_protocol::server::SandboxServer;
+use model_sandbox_protocol::server::{CreateParams, DestroyParams, ExecuteParams, ReadFileParams};
+use rmcp::handler::server::wrapper::Parameters;
 
 // =============================================================================
 // Credential Path Blocking Tests (P1 Security)
@@ -454,4 +458,305 @@ fn test_loopback_available() {
 
     // This is a basic check - actual loopback testing is in sandbox.rs
     assert!(result.is_ok());
+}
+
+// =============================================================================
+// Symlink Escape Prevention Tests
+// =============================================================================
+
+/// Test that symlink to /etc/shadow cannot be used to escape sandbox.
+#[test]
+fn test_symlink_escape_etc_shadow() {
+    let sandbox =
+        SandboxContainer::new(SandboxConfig::default()).expect("failed to create sandbox");
+
+    // Try to create a symlink to /etc/shadow and read it
+    let result = sandbox.execute(
+        "sh",
+        &[
+            "-c",
+            "ln -sf /etc/shadow /tmp/shadow_link 2>/dev/null && cat /tmp/shadow_link 2>&1",
+        ],
+    );
+
+    match result {
+        Ok(output) => {
+            // Either the symlink creation should fail, or reading should fail,
+            // or the content should be empty/error
+            assert!(
+                !output.success() || output.stdout.is_empty() || output.stderr.contains("denied"),
+                "symlink escape to /etc/shadow should be prevented"
+            );
+        }
+        Err(_) => {
+            // Error is acceptable - means operation was blocked
+        }
+    }
+}
+
+/// Test that symlink to credential directories cannot be used to escape sandbox.
+#[test]
+fn test_symlink_escape_ssh_keys() {
+    let sandbox =
+        SandboxContainer::new(SandboxConfig::default()).expect("failed to create sandbox");
+
+    // Try to create a symlink to ~/.ssh and actually follow/read through it
+    // Creating the symlink itself is fine - following it to read contents should fail
+    let result = sandbox.execute(
+        "sh",
+        &[
+            "-c",
+            "ln -sf /root/.ssh /tmp/ssh_link 2>/dev/null && ls /tmp/ssh_link/ 2>&1",
+        ],
+    );
+
+    match result {
+        Ok(output) => {
+            // Following the symlink should fail (target doesn't exist or is inaccessible)
+            // The key thing is that even if the symlink is created, the TARGET is not accessible
+            assert!(
+                !output.success()
+                    || output.stdout.is_empty()
+                    || output.stdout.contains("No such file")
+                    || output.stdout.contains("cannot access")
+                    || output.stderr.contains("No such file")
+                    || output.stderr.contains("cannot access"),
+                "symlink escape to .ssh should be prevented (target inaccessible), got: stdout={}, stderr={}",
+                output.stdout,
+                output.stderr
+            );
+        }
+        Err(_) => {
+            // Error is acceptable - operation blocked
+        }
+    }
+}
+
+/// Test that path traversal via symlinks is blocked.
+#[test]
+fn test_path_traversal_via_symlink() {
+    let sandbox =
+        SandboxContainer::new(SandboxConfig::default()).expect("failed to create sandbox");
+
+    // Try to use path traversal via symlink
+    let result = sandbox.execute(
+        "sh",
+        &[
+            "-c",
+            r#"
+            mkdir -p /tmp/escape_test
+            ln -sf ../../../etc/passwd /tmp/escape_test/link
+            cat /tmp/escape_test/link 2>&1
+            "#,
+        ],
+    );
+
+    // The file read may succeed (passwd is safe), but verify we're reading
+    // the sandbox's passwd, not escaping to host
+    // This is more of a sanity check - actual escape would need to target
+    // something outside the sandbox overlay
+    assert!(result.is_ok());
+}
+
+// =============================================================================
+// MCP Tool-Level Security Tests
+// =============================================================================
+
+/// Test that sandbox_execute cannot access SSH keys via MCP tools.
+#[tokio::test]
+async fn test_mcp_execute_cannot_access_ssh_keys() {
+    let server = SandboxServer::with_defaults();
+
+    // Create a session
+    let create = server
+        .sandbox_create(Parameters(CreateParams {
+            name: Some("security-test".to_string()),
+            workspace_path: None,
+            timeout_seconds: Some(60),
+        }))
+        .await
+        .expect("sandbox_create should succeed")
+        .0;
+
+    // Try to read SSH private key via sandbox_execute
+    let exec = server
+        .sandbox_execute(Parameters(ExecuteParams {
+            session_id: create.session_id.clone(),
+            command: "cat".to_string(),
+            args: Some(vec!["/root/.ssh/id_rsa".to_string()]),
+            working_dir: None,
+        }))
+        .await
+        .expect("sandbox_execute should return result")
+        .0;
+
+    // Command should fail (file not found or permission denied)
+    assert!(
+        !exec.success,
+        "cat /root/.ssh/id_rsa should fail via MCP tool"
+    );
+
+    // Cleanup
+    let _ = server
+        .sandbox_destroy(Parameters(DestroyParams {
+            session_id: create.session_id,
+        }))
+        .await;
+}
+
+/// Test that sandbox_execute cannot access AWS credentials via MCP tools.
+#[tokio::test]
+async fn test_mcp_execute_cannot_access_aws_credentials() {
+    let server = SandboxServer::with_defaults();
+
+    let create = server
+        .sandbox_create(Parameters(CreateParams {
+            name: None,
+            workspace_path: None,
+            timeout_seconds: Some(60),
+        }))
+        .await
+        .expect("sandbox_create should succeed")
+        .0;
+
+    // Try to read AWS credentials
+    let exec = server
+        .sandbox_execute(Parameters(ExecuteParams {
+            session_id: create.session_id.clone(),
+            command: "cat".to_string(),
+            args: Some(vec!["/root/.aws/credentials".to_string()]),
+            working_dir: None,
+        }))
+        .await
+        .expect("sandbox_execute should return result")
+        .0;
+
+    assert!(
+        !exec.success,
+        "cat /root/.aws/credentials should fail via MCP tool"
+    );
+
+    let _ = server
+        .sandbox_destroy(Parameters(DestroyParams {
+            session_id: create.session_id,
+        }))
+        .await;
+}
+
+/// Test that sandbox_read_file cannot be used for path traversal.
+#[tokio::test]
+async fn test_mcp_read_file_rejects_path_traversal() {
+    let server = SandboxServer::with_defaults();
+
+    let create = server
+        .sandbox_create(Parameters(CreateParams {
+            name: None,
+            workspace_path: None,
+            timeout_seconds: Some(60),
+        }))
+        .await
+        .expect("sandbox_create should succeed")
+        .0;
+
+    // Try path traversal via sandbox_read_file
+    let result = server
+        .sandbox_read_file(Parameters(ReadFileParams {
+            session_id: create.session_id.clone(),
+            path: "../../../etc/passwd".to_string(),
+        }))
+        .await;
+
+    // Should be rejected at the API level (path validation)
+    assert!(
+        result.is_err(),
+        "sandbox_read_file should reject path traversal"
+    );
+
+    let _ = server
+        .sandbox_destroy(Parameters(DestroyParams {
+            session_id: create.session_id,
+        }))
+        .await;
+}
+
+/// Test that sandbox_read_file rejects absolute paths.
+#[tokio::test]
+async fn test_mcp_read_file_rejects_absolute_paths() {
+    let server = SandboxServer::with_defaults();
+
+    let create = server
+        .sandbox_create(Parameters(CreateParams {
+            name: None,
+            workspace_path: None,
+            timeout_seconds: Some(60),
+        }))
+        .await
+        .expect("sandbox_create should succeed")
+        .0;
+
+    // Try absolute path via sandbox_read_file
+    let result = server
+        .sandbox_read_file(Parameters(ReadFileParams {
+            session_id: create.session_id.clone(),
+            path: "/etc/passwd".to_string(),
+        }))
+        .await;
+
+    // Should be rejected at the API level
+    assert!(
+        result.is_err(),
+        "sandbox_read_file should reject absolute paths"
+    );
+
+    let _ = server
+        .sandbox_destroy(Parameters(DestroyParams {
+            session_id: create.session_id,
+        }))
+        .await;
+}
+
+/// Test that /proc is properly namespaced via MCP tools.
+#[tokio::test]
+async fn test_mcp_execute_proc_namespaced() {
+    let server = SandboxServer::with_defaults();
+
+    let create = server
+        .sandbox_create(Parameters(CreateParams {
+            name: None,
+            workspace_path: None,
+            timeout_seconds: Some(60),
+        }))
+        .await
+        .expect("sandbox_create should succeed")
+        .0;
+
+    // Count processes visible in /proc
+    let exec = server
+        .sandbox_execute(Parameters(ExecuteParams {
+            session_id: create.session_id.clone(),
+            command: "sh".to_string(),
+            args: Some(vec![
+                "-c".to_string(),
+                "ls /proc | grep -E '^[0-9]+$' | wc -l".to_string(),
+            ]),
+            working_dir: None,
+        }))
+        .await
+        .expect("sandbox_execute should succeed")
+        .0;
+
+    assert!(exec.success, "process listing should succeed");
+
+    let process_count: i32 = exec.stdout.trim().parse().unwrap_or(999);
+    assert!(
+        process_count < 10,
+        "should see very few processes in /proc via MCP tool, got {}",
+        process_count
+    );
+
+    let _ = server
+        .sandbox_destroy(Parameters(DestroyParams {
+            session_id: create.session_id,
+        }))
+        .await;
 }

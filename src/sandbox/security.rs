@@ -154,6 +154,12 @@ impl MountPolicyGuard {
         // Check against forbidden home prefixes
         for forbidden in &self.forbidden_home_paths {
             if canonical.starts_with(forbidden) {
+                warn!(
+                    path = %path.display(),
+                    canonical = %canonical.display(),
+                    forbidden = %forbidden.display(),
+                    "SECURITY AUDIT: Mount source rejected - forbidden credential path"
+                );
                 return Err(MountError::SecurityViolation(format!(
                     "mount source is under forbidden credential path: {}",
                     forbidden.display()
@@ -164,6 +170,12 @@ impl MountPolicyGuard {
         // Check against forbidden absolute prefixes
         for forbidden in &self.forbidden_absolute_paths {
             if canonical.starts_with(forbidden) {
+                warn!(
+                    path = %path.display(),
+                    canonical = %canonical.display(),
+                    forbidden = %forbidden.display(),
+                    "SECURITY AUDIT: Mount source rejected - forbidden system path"
+                );
                 return Err(MountError::SecurityViolation(format!(
                     "mount source is under forbidden system path: {}",
                     forbidden.display()

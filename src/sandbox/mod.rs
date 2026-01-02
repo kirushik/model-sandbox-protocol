@@ -26,7 +26,7 @@ pub mod security;
 pub mod workspace;
 
 pub use config::SandboxConfig;
-pub use container::{CommandOutput, SandboxContainer};
+pub use container::{CommandOutput, SESSION_MOUNT_POINT, SandboxContainer};
 pub use mounts::{FORBIDDEN_PATHS, MountConfig, SAFE_ETC_FILES};
 pub use security::MountPolicyGuard;
 pub use workspace::{PreparedWorkspace, WORKSPACE_MOUNT_POINT, WorkspaceConfig, prepare_workspace};

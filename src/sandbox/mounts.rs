@@ -33,22 +33,54 @@ use crate::session::SessionPaths;
 /// Paths that must NEVER be accessible from within the sandbox.
 ///
 /// These contain sensitive credentials that could be exfiltrated if exposed.
-/// This list is checked during mount validation.
+/// This list is checked during mount validation and workspace preparation.
+///
+/// # Security Rationale
+///
+/// Each path in this list represents a common location for credential storage:
+///
+/// - `.ssh` - SSH private keys, known_hosts, authorized_keys
+/// - `.aws` - AWS credentials, config, SSO cache
+/// - `.config/gcloud` - Google Cloud credentials and application default credentials
+/// - `.kube` - Kubernetes cluster credentials and contexts
+/// - `.gnupg` - GPG private keys, keyrings, trust databases
+/// - `.gitconfig` - Git config (may contain credential helpers, tokens)
+/// - `.netrc` - Machine credentials for FTP, HTTP basic auth
+/// - `.git-credentials` - Git credential helper plaintext cache
+/// - `.config/gh` - GitHub CLI OAuth tokens and config
+/// - `.docker/config.json` - Docker registry credentials
+/// - `.npmrc` - NPM registry authentication tokens
+/// - `.pypirc` - PyPI repository credentials
+/// - `.cargo/credentials` - crates.io API tokens (legacy format)
+/// - `.cargo/credentials.toml` - crates.io API tokens (TOML format)
+///
+/// # Symlink Handling
+///
+/// Paths are validated AFTER canonicalization, so symlinks pointing to these
+/// locations are also blocked. Top-level symlinks are rejected outright.
+///
+/// # Adding New Paths
+///
+/// When adding new paths, consider:
+/// 1. Is this a common credential storage location?
+/// 2. Could exposure lead to account compromise or data exfiltration?
+/// 3. Document the rationale in this comment block.
+/// 4. Add corresponding tests in `tests/security.rs`.
 pub const FORBIDDEN_PATHS: &[&str] = &[
-    ".ssh",
-    ".aws",
-    ".config/gcloud",
-    ".kube",
-    ".gnupg",
-    ".gitconfig",
-    ".netrc",
-    ".git-credentials",
-    ".config/gh",
-    ".docker/config.json",
-    ".npmrc",
-    ".pypirc",
-    ".cargo/credentials",
-    ".cargo/credentials.toml",
+    ".ssh",                    // SSH keys and config
+    ".aws",                    // AWS credentials
+    ".config/gcloud",          // Google Cloud credentials
+    ".kube",                   // Kubernetes credentials
+    ".gnupg",                  // GPG keys
+    ".gitconfig",              // Git config (may contain tokens)
+    ".netrc",                  // Network credentials
+    ".git-credentials",        // Git credential cache
+    ".config/gh",              // GitHub CLI credentials
+    ".docker/config.json",     // Docker registry credentials
+    ".npmrc",                  // NPM credentials
+    ".pypirc",                 // PyPI credentials
+    ".cargo/credentials",      // Cargo/crates.io credentials
+    ".cargo/credentials.toml", // Cargo credentials (TOML format)
 ];
 
 /// Safe files from /etc that can be included in the sandbox.

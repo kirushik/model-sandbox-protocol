@@ -1078,3 +1078,58 @@ fn test_multiple_sessions_have_isolated_upper_directories() {
     // Cleanup
     cleanup_config(&config);
 }
+
+/// Test that new files created in workspace with session don't appear on host.
+///
+/// This verifies the key security property: when using sessions with overlayfs,
+/// writes inside the sandbox go to the session's upper layer, not the actual
+/// host filesystem. This protects host files from modification.
+#[test]
+fn test_workspace_new_files_isolated_from_host() {
+    use model_sandbox_protocol::sandbox::{SandboxConfig, SandboxContainer};
+    use model_sandbox_protocol::session::{SessionConfig, SessionManager};
+    use std::time::Duration;
+    use tempfile::tempdir;
+
+    // Create session manager and session
+    let session_config = SessionConfig::default().with_ttl(Duration::from_secs(300));
+    let manager = SessionManager::new(session_config);
+    let session = manager.create_session().expect("failed to create session");
+
+    manager
+        .prepare_session_mounts(session.id)
+        .expect("failed to prepare mounts");
+
+    // Create a temporary workspace directory
+    let workspace_dir = tempdir().expect("failed to create temp workspace");
+    let workspace_path = workspace_dir.path();
+
+    // Create sandbox with session and workspace
+    let config = SandboxConfig::default()
+        .with_session_id(session.id)
+        .with_workspace(workspace_path.to_str().expect("workspace path"));
+
+    let sandbox = SandboxContainer::with_session(session.clone(), Some(config))
+        .expect("failed to create sandbox");
+
+    // Try to create a new file inside sandbox workspace
+    let _ = sandbox.execute(
+        "sh",
+        &[
+            "-c",
+            "echo 'new content' > /workspace/new_file.txt 2>&1 || true",
+        ],
+    );
+
+    // Verify the new file does NOT appear on host
+    let new_file_on_host = workspace_path.join("new_file.txt");
+    assert!(
+        !new_file_on_host.exists(),
+        "new files created in sandbox workspace should not appear on host filesystem"
+    );
+
+    // Cleanup
+    manager
+        .destroy_session(session.id)
+        .expect("failed to destroy session");
+}

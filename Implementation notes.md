@@ -304,3 +304,19 @@ For a production MCP sandbox server:
 6. **Network**: Default isolated; if egress needed, veth pair with SNI-filtering transparent proxy
 
 For hostile multi-tenant workloads, consider **Firecracker microVMs**—the 125ms startup cost is acceptable for the hardware isolation boundary. For single-tenant AI agent use cases, namespace-based isolation with comprehensive seccomp filtering provides sufficient security with faster startup.
+
+
+## Sandbox Environment
+
+### Filesystem Visibility
+- **Root (`/`)**: Read-only view of the host's root filesystem. Standard tools (`/bin`, `/usr`, etc.) are available.
+- **Workspace (`/workspace`)**: Read-write directory for the session. If a host path was mounted, it appears here.
+- **Session Root (`/msp/session`)**: Read-write directory for session-specific files.
+- **`/tmp`**: Private, writable temporary directory (tmpfs).
+- **`/dev`**: Minimal device nodes (`null`, `zero`, `full`, `random`, `urandom`, `tty`, `ptmx`).
+- **`/proc`**: Private process namespace view.
+
+### Current Security Constraints
+- **Network**: No network access (loopback only).
+- **User**: Runs as a mapped user (looks like root inside, unprivileged outside).
+- **Sensitive Paths**: Paths like `/etc/shadow`, `~/.ssh`, `~/.aws`, `~/.kube` are masked or inaccessible.

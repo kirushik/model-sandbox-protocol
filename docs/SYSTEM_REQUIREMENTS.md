@@ -71,7 +71,21 @@ sysctl -w kernel.unprivileged_userns_clone=1
 echo 'kernel.unprivileged_userns_clone=1' >> /etc/sysctl.d/99-userns.conf
 ```
 
-**Note:** Some distributions (Debian, Ubuntu) have this enabled by default. Others (RHEL/CentOS, Arch) may require explicit enablement.
+#### AppArmor note (Ubuntu / Debian derivatives)
+
+Some systems additionally restrict unprivileged user namespaces via AppArmor.
+If `unshare -U` fails with errors such as `write /proc/self/uid_map: Operation not permitted`
+*even when* `kernel.unprivileged_userns_clone=1`, check:
+
+```bash
+sysctl kernel.apparmor_restrict_unprivileged_userns
+```
+
+If it is `1`, you may need to set it to `0` (requires root) **or** install an AppArmor
+profile that allows the specific namespace operations this server needs.
+
+> We plan to ship an AppArmor profile later so you can keep this restriction enabled
+> while still running the server.
 
 **Security consideration:** Enabling unprivileged user namespaces increases kernel attack surface. This is a known trade-off for unprivileged containerization. Keep kernel updated to mitigate namespace-related CVEs.
 

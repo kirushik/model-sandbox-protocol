@@ -10,19 +10,27 @@
 //!
 //! # Filesystem model
 //!
-//! ## Phase 1 (without sessions)
+//! ## Phase 3 (denylist host-userland exposure + session overlay mountpoint)
 //!
-//! Uses hakoniwa's `rootfs("/")` convenience, which bind-mounts a limited set of host
-//! directories (`/bin`, `/etc`, `/lib`, `/lib64`, `/lib32`, `/sbin`, `/usr`) read-only into the new
-//! mount namespace.
+//! **Goal**: maximize tool availability inside the sandbox by exposing a largely complete
+//! host userland (installed binaries and shared libraries) while keeping the sandbox
+//! non-malleable with respect to the host OS base.
 //!
-//! ## Phase 2 (with sessions)
+//! **Approach**:
+//! - Use hakoniwa's `rootfs("/")` as the base root to bind-mount the host OS userland
+//!   into the sandbox mount namespace with read-only access by default.
+//! - Mount the per-session writable filesystem (OverlayFS merged view) at a fixed mountpoint
+//!   **inside** the sandbox, currently `/msp/session`.
+//! - The workspace bind mount (when configured) remains available at `/workspace`.
 //!
-//! When a `Session` is provided, the sandbox uses OverlayFS to create an isolated,
-//! persistent filesystem:
-//! - Lower layer: Read-only host directories
-//! - Upper layer: Per-session writable layer (persists across executions)
-//! - Merged view: Combined filesystem presented to sandboxed process
+//! **Important**: This strategy is intentionally "denylist/masking-forward".
+//! Sensitive host paths must be masked inside the sandbox mount namespace (follow-ups).
+//!
+//! # Follow-up work (documented elsewhere)
+//!
+//! - Thorough denylist design + masking implementation inside mount namespace
+//! - Tests proving credential paths are inaccessible even when host userland is exposed
+//! - Read-only enforcement verification for host base mounts
 //!
 //! # Future: Network Egress (Item 1.7)
 //!
@@ -50,10 +58,10 @@
 //!
 //! We still drain `stdout`/`stderr` concurrently to avoid deadlocks in case of large outputs.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::mpsc;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
 use hakoniwa::{Container, Namespace, Stdio};
@@ -63,6 +71,12 @@ use super::SandboxConfig;
 use super::workspace::{WORKSPACE_MOUNT_POINT, WorkspaceConfig, prepare_workspace};
 use crate::error::SandboxError;
 use crate::session::Session;
+
+/// In-sandbox mountpoint where the session overlay filesystem is made available.
+///
+/// This is used when we expose host userland tools at `/` (read-only base) while still
+/// providing a writable session filesystem view.
+pub const SESSION_MOUNT_POINT: &str = "/msp/session";
 
 /// Global semaphore to serialize namespace/mount creation during sandbox setup.
 ///
@@ -223,26 +237,36 @@ impl SandboxContainer {
         container.hostname(&self.config.hostname);
 
         // ===== Phase 2: Filesystem Setup =====
-        // Configure filesystem based on whether we have a session
-        if let Some(session) = &self.session {
-            // Phase 2: Use session's merged directory as root
-            // Note: For full OverlayFS support, the overlay should be mounted
-            // in the child's mount namespace. Currently we use the session's
-            // merged directory directly (which works if overlay is pre-mounted
-            // or for testing with the upper directory as workspace).
-            //
-            // TODO: Integrate overlay mounting into namespace setup for proper
-            // unprivileged OverlayFS in user namespace.
-            trace!(merged_path = %session.paths.merged.display(), "Using session filesystem");
+        //
+        // Phase 3 strategy:
+        // - Always expose host userland at `/` via `rootfs("/")` (read-only base mounts),
+        //   so common tools are available.
+        // - If a session is present, additionally mount the session filesystem at a fixed
+        //   path (`/msp/session`) inside the sandbox.
+        //
+        // NOTE: The session overlay mount itself is still expected to be created inside
+        // the sandbox mount namespace in later phases. For now, we treat `session.paths.merged`
+        // as the session filesystem root to mount into the sandbox namespace.
+        container
+            .rootfs("/")
+            .map_err(|e| SandboxError::CreationFailed(format!("failed to set rootfs: {e}")))?;
 
-            container.rootdir(&session.paths.merged);
-        } else {
-            // Phase 1 compatibility: Use hakoniwa's rootfs helper
-            // IMPORTANT: When host_path is "/", hakoniwa only bind-mounts:
-            // `/bin`, `/etc`, `/lib`, `/lib64`, `/lib32`, `/sbin`, `/usr`.
-            container
-                .rootfs("/")
-                .map_err(|e| SandboxError::CreationFailed(format!("failed to set rootfs: {e}")))?;
+        if let Some(session) = &self.session {
+            trace!(
+                merged_path = %session.paths.merged.display(),
+                mount_point = %SESSION_MOUNT_POINT,
+                "Mounting session filesystem into sandbox"
+            );
+
+            // Ensure the mountpoint exists in the sandbox rootfs. Hakoniwa may leave behind
+            // mountpoint targets; this is acceptable for now.
+            //
+            // We mount the session merged directory read-write, since it is already the
+            // isolated writable view (OverlayFS merged path) for this session.
+            let host_path_str = session.paths.merged.to_string_lossy();
+            container.bindmount_rw(&host_path_str, SESSION_MOUNT_POINT);
+
+            trace!("Session bind mount configured");
         }
 
         // ===== Phase 3: Standard Mounts =====
@@ -364,6 +388,26 @@ impl SandboxContainer {
     /// - `SandboxError::OutputEncodingError` if stdout/stderr are not valid UTF-8
     #[instrument(skip(self, args), fields(command = %command, timeout_ms = %self.config.timeout.as_millis()))]
     pub fn execute(&self, command: &str, args: &[&str]) -> Result<CommandOutput, SandboxError> {
+        self.execute_with_stdin(command, args, None)
+    }
+
+    /// Executes a command in the sandbox while optionally piping bytes to stdin.
+    ///
+    /// This is the primitive needed for fully in-sandbox file writes (e.g. `tee`, `cat > file`)
+    /// without host-side filesystem access.
+    ///
+    /// Returns:
+    /// - `SandboxError::InvalidCommand` if the command is empty
+    /// - `SandboxError::ExecutionFailed` if the command cannot be spawned
+    /// - `SandboxError::Timeout` if the command exceeds the configured timeout
+    /// - `SandboxError::OutputEncodingError` if stdout/stderr are not valid UTF-8
+    #[instrument(skip(self, args, stdin_bytes), fields(command = %command, timeout_ms = %self.config.timeout.as_millis(), stdin_len = stdin_bytes.as_ref().map_or(0, |b| b.len())))]
+    pub fn execute_with_stdin(
+        &self,
+        command: &str,
+        args: &[&str],
+        stdin_bytes: Option<&[u8]>,
+    ) -> Result<CommandOutput, SandboxError> {
         if command.is_empty() {
             return Err(SandboxError::InvalidCommand(
                 "command cannot be empty".to_string(),
@@ -396,6 +440,9 @@ impl SandboxContainer {
         cmd.args(args);
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
+        if stdin_bytes.is_some() {
+            cmd.stdin(Stdio::piped());
+        }
 
         // Set working directory
         // Default to /workspace if workspace is mounted and no explicit working_dir
@@ -436,6 +483,37 @@ impl SandboxContainer {
         drop(setup_guard);
         trace!("Setup semaphore released, child process running");
 
+        // If stdin piping is requested, write all bytes then close stdin.
+        //
+        // Important: Writing stdin can block if the child isn't reading. We do it on a thread so
+        // our timeout loop can continue, and we can abandon the writer thread on timeout.
+        //
+        // The writer thread is joined on normal completion to avoid leaking threads.
+        let mut stdin_writer: Option<(Arc<std::sync::atomic::AtomicBool>, thread::JoinHandle<()>)> =
+            None;
+        if let Some(input) = stdin_bytes {
+            let mut stdin = child.stdin.take().ok_or_else(|| {
+                SandboxError::ExecutionFailed("failed to open stdin pipe".to_string())
+            })?;
+
+            let stop_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let stop_flag_thread = Arc::clone(&stop_flag);
+
+            let input_vec = input.to_vec();
+            let handle = thread::spawn(move || {
+                // Best-effort cancellation: if we timed out, stop writing.
+                if stop_flag_thread.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+
+                let _ = stdin.write_all(&input_vec);
+                let _ = stdin.flush();
+                // Drop closes the pipe.
+            });
+
+            stdin_writer = Some((stop_flag, handle));
+        }
+
         // Drain stdout/stderr concurrently so the child can't deadlock on full pipes.
         let mut stdout_reader = child.stdout.take();
         let mut stderr_reader = child.stderr.take();
@@ -470,6 +548,12 @@ impl SandboxContainer {
                         debug!(elapsed_ms = %start.elapsed().as_millis(), "Command timed out, sending SIGKILL");
                         let _ = child.kill();
                         let _ = child.wait();
+
+                        // Signal stdin writer to stop and do not join it on timeout (it may be blocked).
+                        if let Some((stop_flag, _handle)) = stdin_writer.take() {
+                            stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+
                         let _ = stdout_join.join();
                         let _ = stderr_join.join();
                         return Err(SandboxError::Timeout {
@@ -493,6 +577,11 @@ impl SandboxContainer {
 
         let _ = stdout_join.join();
         let _ = stderr_join.join();
+
+        // Join stdin writer on normal completion to avoid leaking threads.
+        if let Some((_stop_flag, handle)) = stdin_writer.take() {
+            let _ = handle.join();
+        }
 
         let stdout =
             String::from_utf8(stdout_bytes).map_err(|_| SandboxError::OutputEncodingError {

@@ -2,6 +2,18 @@
 
 Sandboxed code execution MCP server for AI agents. Executes untrusted code in isolated Linux namespaces with copy-on-write filesystem.
 
+## Phase 3 Decision: Host OS Exposure via Denylist (Compatibility Mode)
+
+**Decision**: In Phase 3, the sandbox will expose a largely complete host OS userland (installed tools, runtimes, package managers, shared libraries) by bind-mounting substantial portions of the host filesystem into the sandbox mount namespace as **read-only**, while preventing access to sensitive host configuration and credentials via a **denylist / masking** approach.
+
+**Motivation**:
+- Reliability and ergonomics: common tools (`sh`, `echo`, `mkdir`, `cat`, `tee`, language runtimes, package managers, build tools) must be available without bundling a separate rootfs image.
+- Allows implementing MCP file tools (`sandbox_read_file`, `sandbox_write_file`) strictly **inside** the sandbox namespace using standard userland utilities.
+
+**Security stance**:
+- This is a **convenience-first** strategy with increased security risk compared to a strict allowlist/minimal rootfs approach.
+- It is explicitly a Phase 3 compatibility mode and must be followed by hardened, well-documented masking policies and tests.
+
 ## Trust Boundaries
 
 ```
@@ -22,6 +34,9 @@ Sandboxed code execution MCP server for AI agents. Executes untrusted code in is
 **Data flow**: AI agent → MCP server (stdio) → sandbox namespace → results back
 
 ## Threat Hierarchy (Severity Order)
+
+**Note (Phase 3 denylist strategy impact)**:
+- Denylist-based host OS exposure primarily increases risk in **P1 (secret exfiltration)** and expands the overall attack surface relevant to **P0 (sandbox escape)**. It also makes the sandbox less hermetic/reproducible across hosts.
 
 | Priority | Threat | Impact |
 |----------|--------|--------|
@@ -66,6 +81,8 @@ Sandboxed code execution MCP server for AI agents. Executes untrusted code in is
 
 ### Data Exfiltration
 
+**Denylist strategy implication**: When large parts of the host OS filesystem are visible read-only, the main risk becomes *unexpected readability* (not writability). Masking must focus on preventing reads of secrets and sensitive configuration. A missed path in the denylist is a direct P1-class vulnerability.
+
 | Target | Location | Mitigation |
 |--------|----------|------------|
 | SSH keys | `~/.ssh/` | Never mount; tmpfs overlay |
@@ -104,9 +121,17 @@ Sandboxed code execution MCP server for AI agents. Executes untrusted code in is
 
 ### Required (P0/P1 Mitigations)
 
+**Additional Phase 3 requirement due to denylist strategy**:
+- **Read-only host base + masking** must be enforced in the sandbox mount namespace:
+  - Large host directories may be exposed **read-only** for tool availability.
+  - Sensitive host paths MUST be masked/over-mounted so they are not readable from within the sandbox.
+  - This must be enforced at mount-namespace level (not by host-side path checks).
+
 1. **Namespace isolation**: User, mount, PID, network, IPC, UTS namespaces via `hakoniwa`
 2. **New session**: Always `setsid()` to prevent TIOCSTI terminal injection
-3. **Credential isolation**: Never bind-mount `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gcloud`
+3. **Credential isolation**: Never expose host credentials (denylist/mask at mount-namespace level), including:
+   - `$HOME` and common credential directories: `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gcloud`, `~/.kube`, `~/.netrc`
+   - Git credential helpers/config as applicable: `~/.gitconfig`, `~/.git-credentials`, system credential stores
 4. **File descriptor hygiene**: Close all unnecessary FDs or set `O_CLOEXEC` before fork/exec into sandbox
 5. **Capability drop**: Drop all capabilities, especially CAP_SYS_ADMIN, CAP_SYS_PTRACE
 6. **Fresh /dev**: Mount new devtmpfs, don't expose host TTYs
@@ -198,6 +223,14 @@ When network egress is enabled via veth pairs:
 
 ## Sandbox Filesystem Layout
 
+**Phase 3 denylist strategy note**: The diagram below is aspirational. Under the denylist strategy, the sandbox may expose additional host paths read-only to make more tools available, but must still guarantee that sensitive paths are masked and that writes can only land in session upper / tmpfs / workspace.
+
+Key invariants:
+- Writable: session upper layer + tmpfs (`/tmp`, `/dev/shm`) + mounted workspace (when enabled)
+- Read-only: host base mounts (e.g. `/usr`, `/bin`, `/lib*`, etc.)
+- Masked: host `$HOME`, credentials, host IPC sockets, and other sensitive host state
+- Fresh mounts: `/proc` and `/dev` are not host-shared
+
 ```
 /.                          # Sandbox root (overlay merged view)
 ├── usr/                    # Read-only from host
@@ -233,6 +266,43 @@ Threats we explicitly do NOT defend against:
 - **TOCTOU in overlay setup**: We use atomic operations and O_NOFOLLOW, but sophisticated races are out of scope
 
 ## Implementation Checklist
+
+### Phase 3 denylist strategy checklist (follow-up after main implementation)
+
+**Human-level documentation**
+- [ ] Add a dedicated section describing the denylist strategy (what is mounted read-only vs masked) and its threat trade-offs.
+- [ ] Document “AI-facing filesystem contract”: what paths are visible, what is writable, what is masked, how `/workspace` resolves.
+- [ ] Document “human operator contract”: what host data must never be exposed, and how to verify configuration is safe.
+
+**Policy design**
+- [ ] Produce a thoroughly designed mask/block list (paths + patterns), including symlink edge cases and common secret locations across distros.
+- [ ] Define the default policy for host mounts (what is included read-only) with rationale, and a review cadence.
+
+**Testing**
+- [ ] Add integration tests proving that known-sensitive locations are unreadable inside sandbox (`$HOME`, `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, etc.).
+- [ ] Add integration tests verifying `/proc` is namespaced and host process info is not visible.
+- [ ] Add integration tests verifying host base mounts are read-only from inside sandbox (writes fail).
+- [ ] Add integration tests verifying tool availability inside sandbox (`/bin/sh`, `echo`, `mkdir`, `cat`, `tee`, etc.) and that `sandbox_execute` is reliable.
+
+**Telemetry / audit**
+- [ ] Log (at debug level) which paths are mounted/masked per sandbox/session (without printing secret values).
+- [ ] Ensure error messages never echo secret-bearing paths or file contents.
+
+Before any sandbox execution, in this order:
+
+- [ ] All namespaces unshared (user, mount, PID, network, IPC, UTS)
+- [ ] New session established (`setsid`)
+- [ ] Network configured (isolated or veth with allowlist + DNS restrictions)
+- [ ] Filesystem mounts prepared (overlay merged view)
+- [ ] Credential paths verified not mounted
+- [ ] All unnecessary file descriptors closed
+- [ ] Landlock rules applied to merged paths (if kernel supports)
+- [ ] Landlock IPC scoping enabled (**required**, kernel 6.7+)
+- [ ] `NO_NEW_PRIVS` set via `prctl`
+- [ ] All capabilities dropped
+- [ ] Resource limits set (cgroups v2) — **required**
+- [ ] Timeout scheduled
+- [ ] Seccomp filter installed (**last step**)
 
 Before any sandbox execution, in this order:
 

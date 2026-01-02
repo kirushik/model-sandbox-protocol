@@ -230,18 +230,18 @@ const FORBIDDEN_PATHS: &[&str] = &[
 
 ### Checklist
 
-- [ ] **3.1** Create `src/server/tools.rs` with tool definitions
-- [ ] **3.2** Create `src/server/session_manager.rs` with actor pattern
-- [ ] **3.3** Implement `sandbox_create` tool
-- [ ] **3.4** Implement `sandbox_execute` tool
-- [ ] **3.5** Implement `sandbox_read_file` tool
-- [ ] **3.6** Implement `sandbox_write_file` tool
-- [ ] **3.7** Implement `sandbox_list` tool
-- [ ] **3.8** Implement `sandbox_destroy` tool
-- [ ] **3.9** Wire tools into ServerHandler
-- [ ] **3.10** Implement TTL enforcement background task
-- [ ] **3.11** Implement orphan cleanup on startup
-- [ ] **3.12** Write integration tests for full MCP flow
+- [x] **3.1** Create `src/server/tools.rs` with tool definitions
+- [x] **3.2** Create `src/server/session_manager.rs` with actor pattern
+- [x] **3.3** Implement `sandbox_create` tool
+- [x] **3.4** Implement `sandbox_execute` tool
+- [x] **3.5** Implement `sandbox_read_file` tool
+- [x] **3.6** Implement `sandbox_write_file` tool
+- [x] **3.7** Implement `sandbox_list` tool
+- [x] **3.8** Implement `sandbox_destroy` tool
+- [x] **3.9** Wire tools into ServerHandler
+- [x] **3.10** Implement TTL enforcement background task
+- [x] **3.11** Implement orphan cleanup on startup
+- [x] **3.12** Write integration tests for full MCP flow
 
 ### Files to Create/Modify
 
