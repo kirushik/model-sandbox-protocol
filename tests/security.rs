@@ -391,6 +391,7 @@ fn test_etc_sudoers_not_accessible() {
 fn test_host_env_not_leaked() {
     // Set a marker environment variable that shouldn't be in sandbox
     // SAFETY: This is a test that runs single-threaded and we clean up after
+    #[allow(unsafe_code)]
     unsafe {
         std::env::set_var("MCP_TEST_SECRET_MARKER", "should_not_leak");
     }
@@ -409,6 +410,7 @@ fn test_host_env_not_leaked() {
     );
 
     // SAFETY: Cleaning up the env var we set above
+    #[allow(unsafe_code)]
     unsafe {
         std::env::remove_var("MCP_TEST_SECRET_MARKER");
     }
