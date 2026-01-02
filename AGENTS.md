@@ -27,6 +27,8 @@ Use `resolve-library-id` then `get-library-docs` from context7 to fetch up-to-da
 
 Use `sequentialthinking` for complex problem breakdown, security analysis, or multi-step planning.
 
+Use `serena` for semantic code retrieval and editing tools.
+
 ## Commands
 
 ```bash
